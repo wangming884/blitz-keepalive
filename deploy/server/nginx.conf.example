@@ -1,0 +1,115 @@
+# Nginx site configuration for blitz-keepalive.
+#
+# Install as /etc/nginx/conf.d/keepalive.conf (or sites-available + symlink),
+# replace keepalive.example.com and the certificate paths, then run:
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# The application must only listen on 127.0.0.1:8090. Do not change the
+# proxy_pass address to a public interface.
+
+# Layer a cheap per-IP login limit in front of the application limiter.
+# Nginx >= 1.25.1 is required for the `http2 on;` directive below.
+limit_req_zone $binary_remote_addr zone=keepalive_login:10m rate=10r/m;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name keepalive.example.com;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name keepalive.example.com;
+
+    server_tokens off;
+    access_log /var/log/nginx/blitz-keepalive.access.log;
+
+    ssl_certificate     /etc/letsencrypt/live/keepalive.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/keepalive.example.com/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+    client_max_body_size 2m;
+
+    # Readiness is intentionally loopback-only by default because it exposes
+    # target IDs and operational state. Add an explicit allow rule for a
+    # trusted monitoring source if external probes are required.
+    location = /readyz {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_redirect off;
+        proxy_hide_header Strict-Transport-Security;
+    }
+
+    # Keep login attempts rate-limited before they reach password verification.
+    location = /api/login {
+        limit_req zone=keepalive_login burst=5 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header Connection "";
+
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_redirect off;
+        proxy_hide_header Strict-Transport-Security;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+
+        # Overwrite, rather than append, client-supplied forwarding headers.
+        # The app only trusts requests whose source is in TRUST_PROXY_CIDRS.
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header Connection "";
+
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_redirect off;
+        # Nginx owns the single HSTS header for the public origin.
+        proxy_hide_header Strict-Transport-Security;
+    }
+}

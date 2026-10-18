@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted backup for Blitz Keepalive
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=blitz-keepalive-backup.service
+
+[Install]
+WantedBy=timers.target

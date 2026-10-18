@@ -51,6 +51,8 @@ const elements = {
   metricHealthy: document.getElementById('metric-healthy'),
   metricFailing: document.getElementById('metric-failing'),
   metricPaused: document.getElementById('metric-paused'),
+  metricReadinessCard: document.getElementById('metric-readiness-card'),
+  metricReadiness: document.getElementById('metric-readiness'),
   metricVisits: document.getElementById('metric-visits'),
   metricMemory: document.getElementById('metric-memory'),
   metricBrowsers: document.getElementById('metric-browsers'),
@@ -104,6 +106,7 @@ const eventLabels = {
   'manual-run-request': '手动巡检',
   'login-success': '登录成功',
   'login-failed': '登录失败',
+  'login-rate-limited': '登录已限流',
   'password-changed': '修改管理密码',
   'target-created': '创建目标',
   'target-updated': '更新目标',
@@ -289,6 +292,7 @@ async function loadOverview({ silent = false } = {}) {
 function render(data) {
   const status = data.status || {};
   const runtime = data.runtime || {};
+  const readiness = data.readiness || {};
   const targets = Array.isArray(data.targets) ? data.targets : [];
   const logs = Array.isArray(data.logs) ? data.logs : [];
   const healthy = targets.filter((target) => target.lastVisit?.ok === true).length;
@@ -299,11 +303,14 @@ function render(data) {
     (failing > 0 ? 'degraded' : targets.some((target) => target.lastVisit) ? 'ok' : 'idle');
 
   setSecurityWarning(data.config || {});
-  renderOverall(overall, targets, failing);
+  const readinessReady = readiness.ready === true;
+  renderOverall(overall, targets, failing, readiness);
   setText(elements.metricTargets, String(targets.length));
   setText(elements.metricHealthy, `${healthy} / ${targets.length}`);
   setText(elements.metricFailing, String(failing));
   setText(elements.metricPaused, String(paused));
+  setText(elements.metricReadiness, readinessReady ? '就绪' : '需关注');
+  elements.metricReadinessCard.dataset.state = readinessReady ? 'ready' : 'warning';
   setText(elements.metricVisits, String(status.visits ?? 0));
   setText(elements.metricMemory, formatBytes(runtime.memoryUsage?.rss));
   setText(elements.metricBrowsers, String(runtime.activeBrowsers ?? 0));
@@ -315,7 +322,7 @@ function render(data) {
   renderLogs(logs);
 }
 
-function renderOverall(overall, targets, failing) {
+function renderOverall(overall, targets, failing, readiness = {}) {
   elements.statusHero.dataset.state = overall;
   if (targets.length === 0) {
     setText(elements.overallLabel, '等待添加目标');
@@ -323,10 +330,16 @@ function renderOverall(overall, targets, failing) {
     return;
   }
   if (overall === 'degraded') {
+    const notReady = Math.max(0, Number(readiness.issueCount) || 0);
+    const overdue = targets.filter((target) => target.overdue === true).length;
+    const issues = [];
+    if (failing > 0) issues.push(`${failing} 个目标连续失败`);
+    if (notReady > 0) issues.push(`${notReady} 个目标未满足保活窗口`);
+    if (overdue > 0) issues.push(`${overdue} 个目标调度超时`);
     setText(elements.overallLabel, '需要关注');
     setText(
       elements.overallDetail,
-      `有 ${failing} 个目标出现连续失败。请检查目标地址、页面文案、代理和浏览器进程。`,
+      `${issues.length > 0 ? issues.join('，') : '业务就绪检查未通过'}。请检查目标地址、页面文案、代理和浏览器进程。`,
     );
     return;
   }
@@ -386,9 +399,15 @@ function targetMatchesFilters(target) {
 
   if (state.targetFilter === 'paused') return target.paused === true;
   if (target.paused) return false;
-  if (state.targetFilter === 'healthy') return target.lastVisit?.ok === true;
+  if (state.targetFilter === 'healthy') {
+    return target.lastVisit?.ok === true && !(target.readinessIssues?.length > 0);
+  }
   if (state.targetFilter === 'failing') {
-    return target.lastVisit?.ok === false || Number(target.consecutiveFailures) > 0;
+    return (
+      target.lastVisit?.ok === false ||
+      Number(target.consecutiveFailures) > 0 ||
+      target.readinessIssues?.length > 0
+    );
   }
   if (state.targetFilter === 'waiting') {
     return !target.lastVisit && Number(target.consecutiveFailures) === 0;
@@ -413,6 +432,7 @@ function targetState(target) {
   if (target.running) return { key: 'running', label: '巡检中' };
   if (target.locked) return { key: 'pending', label: '处理中' };
   if (target.pendingRun) return { key: 'pending', label: '已排队' };
+  if (target.readinessIssues?.length > 0) return { key: 'failed', label: '需关注' };
   if (target.lastVisit?.ok === true) return { key: 'ok', label: '正常' };
   if (target.lastVisit || Number(target.consecutiveFailures) > 0) {
     return { key: 'failed', label: '异常' };
@@ -476,6 +496,7 @@ function createTargetCard(target) {
     '访问窗口',
     `${target.intervalMin ?? '--'} 分钟 + 最多 ${target.jitterMin ?? '--'} 分钟`,
   );
+  appendFact(facts, '保活状态', formatTargetReadiness(target));
   const nextDue = appendFact(facts, '下次执行', formatNext(target.nextDue));
   if (target.nextDue) nextDue.dataset.nextDue = target.nextDue;
   appendFact(facts, '最近成功', target.lastSuccessfulVisitAt ? formatDateTime(target.lastSuccessfulVisitAt) : '尚无成功记录');
@@ -524,6 +545,17 @@ function createTargetCard(target) {
   footer.append(reason, actions);
   card.append(head, url, ...(pauseNotice ? [pauseNotice] : []), facts, footer);
   return card;
+}
+
+function formatTargetReadiness(target) {
+  if (target.paused) return '已暂停';
+  const labels = {
+    'consecutive-failures': '连续失败',
+    'schedule-overdue': '调度超时',
+    'stale-success': '成功记录过期',
+  };
+  const issues = Array.isArray(target.readinessIssues) ? target.readinessIssues : [];
+  return issues.length > 0 ? issues.map((issue) => labels[issue] || issue).join('、') : '正常';
 }
 
 function makeActionButton(label, className, onClick) {

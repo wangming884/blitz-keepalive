@@ -156,6 +156,30 @@ async function waitForOverview(baseUrl, cookie, predicate, timeoutMs = 25_000) {
   throw new Error(`timed out waiting for overview condition; last=${JSON.stringify(last)}`);
 }
 
+async function waitForLogEvent(file, eventName, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const text = await readFile(file, 'utf8');
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry.event === eventName) return entry;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(100);
+  }
+  throw new Error(
+    `timed out waiting for log event ${eventName} in ${file}: ${lastError?.message ?? 'event not found'}`,
+  );
+}
 async function startManagementInstance(tempDir, label, extraEnv = {}) {
   const port = await getFreePort();
   const directory = path.join(tempDir, label);
@@ -271,6 +295,7 @@ async function main() {
     assert.match(adminHtml, /登录管理控制台/);
     assert.match(adminHtml, /安全设置/);
     assert.match(adminHtml, /修改管理密码/);
+    assert.match(adminHtml, /业务就绪/);
     assert.equal((await fetch(`${baseUrl}/assets/app.js`)).status, 200);
     assert.equal((await fetch(`${baseUrl}/assets/styles.css`)).status, 200);
 
@@ -343,6 +368,12 @@ async function main() {
     assert.equal(changedPassword.data.passwordFileExists, true);
     assert.equal(changedPassword.data.passwordChangeAvailable, true);
     const changedCookie = sessionCookie(changedPassword.response);
+    const passwordChangedLog = await waitForLogEvent(
+      path.join(logDir, 'keepalive.log'),
+      'password-changed',
+    );
+    assert.equal(passwordChangedLog.client, '127.0.0.1');
+    assert.equal(passwordChangedLog.via, 'session');
 
     const invalidatedCookie = await request(baseUrl, '/api/overview', { cookie });
     assert.equal(invalidatedCookie.response.status, 401);
@@ -530,7 +561,9 @@ async function main() {
     assert.equal(secretKeyText.includes(TARGET_PASSWORD), false);
 
     const keepaliveLogText = await readFile(path.join(logDir, 'keepalive.log'), 'utf8');
-    assert.equal(keepaliveLogText.includes(TARGET_PASSWORD), false);
+    for (const secret of [PASSWORD, NEW_PASSWORD, TARGET_PASSWORD]) {
+      assert.equal(keepaliveLogText.includes(secret), false);
+    }
 
     await stopProcess(keepalive, 'keepalive');
     keepalive = null;
@@ -617,6 +650,12 @@ async function main() {
     });
     assert.equal(locked.response.status, 429);
     assert.ok(Number(locked.data.retryAfterSec) > 0);
+    const rateLimitLog = await waitForLogEvent(
+      path.join(logDir, 'keepalive.log'),
+      'login-rate-limited',
+    );
+    assert.equal(rateLimitLog.client, '127.0.0.1');
+    assert.ok(Number(rateLimitLog.retryAfterSec) > 0);
 
     const readOnlyToken = 'readonly-test-token-9d2c';
     const tokenInstance = await startManagementInstance(tempDir, 'status-token', {
@@ -693,9 +732,11 @@ async function main() {
         checks: [
           'port-without-password-rejected',
           'admin-assets-served',
+          'admin-readiness-card',
           'anonymous-api-rejected',
           'password-login-and-session',
           'password-change-validation-and-persistence',
+          'password-change-audit-context',
           'password-change-invalidates-old-sessions',
           'password-change-rotates-login-secret',
           'restart-uses-persisted-password',
@@ -719,6 +760,8 @@ async function main() {
           'managed-target-delete',
           'logout-invalidates-session',
           'login-rate-limit',
+          'login-rate-limit-audit-context',
+          'sensitive-values-not-logged',
           'status-token-is-read-only',
           'https-required-healthz-exemption',
           'target-url-private-address-rejected',

@@ -16,7 +16,7 @@ FROM mcr.microsoft.com/playwright:v1.56.1-noble@sha256:f1e7e01021efd65dd1a2c5606
 ENV NODE_ENV=production \
     CHROME_PATH=/ms-playwright/chromium-1194/chrome-linux/chrome \
     CHROME_NO_SANDBOX=true \
-    PORT=8080 \
+    PORT=8090 \
     BIND_HOST=0.0.0.0 \
     TRUST_PROXY_CIDRS=127.0.0.1/32,::1/128 \
     HOME=/tmp \
@@ -38,9 +38,9 @@ RUN mkdir -p /app/logs /app/data && chown -R pwuser:pwuser /app
 VOLUME ["/app/data", "/app/logs"]
 
 USER pwuser
-EXPOSE 8080
+EXPOSE 8090
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8090)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "/app/keepalive.mjs"]

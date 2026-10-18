@@ -65,9 +65,8 @@ targets.json
 每 5 秒扫描一次到期目标
         │
         ▼
-并发池（maxConcurrent，默认 2）
-  ├─ worker 1: 启动独立 Chrome → 访问 → 校验 → 关闭
-  └─ worker 2: 启动独立 Chrome → 访问 → 校验 → 关闭
+并发池（maxConcurrent，默认 1）
+  └─ worker 1: 启动独立 Chrome → 访问 → 校验 → 关闭
         │
         ▼
 每个目标独立计算下一次时间、独立重试、独立失败截图
@@ -97,7 +96,7 @@ targets.json
     "retries": 2,
     "retryDelaySec": 60
   },
-  "maxConcurrent": 2,
+  "maxConcurrent": 1,
   "targets": [
     { "id": "alice-blog",   "account": "alice", "url": "https://blog.alice.blitz.cloud",   "expect": "Alice" },
     { "id": "alice-n8n",    "account": "alice", "url": "https://n8n.alice.blitz.cloud",    "expect": "n8n", "intervalMin": 15 },
@@ -117,7 +116,7 @@ targets.json
 | `intervalMin` | 该目标的访问间隔，1–28 分钟，且必须满足 `intervalMin + jitterMin <= 28` |
 | `jitterMin` | 该目标的随机延迟上限，0–10 分钟 |
 | `timeoutSec` / `wakeWaitSec` / `settleSec` / `retries` | 覆盖默认超时、唤醒等待、停留、重试 |
-| `maxConcurrent` | 同时访问几个目标（1–5，默认 2） |
+| `maxConcurrent` | 同时访问几个目标；默认 1，Docker 生产配置固定为 1 |
 
 优先级：**目标级 > 命令行/环境变量 > defaults**。例如给 n8n 单独设 15 分钟，其余仍用 20 分钟。
 
@@ -143,11 +142,12 @@ targets.json
 | 目标数 | maxConcurrent | 峰值内存 | 一轮扫描耗时 |
 | --- | --- | --- | --- |
 | 1 | 1 | 约 200–250 MB | < 1 分钟 |
-| 1–5 | 2 | 约 400–500 MB | < 1 分钟 |
-| 6–20 | 2–3 | 约 600 MB–1 GB | 1–3 分钟 |
-| 20–50 | 3 | 至少约 1 GB | 3–5 分钟 |
+| 1–5 | 1 | 约 300–450 MB | < 1 分钟 |
+| 6–20 | 1 | 约 400–500 MB | 1–3 分钟 |
+| 20–50 | 1 | 约 400–500 MB | 3–6 分钟 |
+| 50–100 | 1 | 约 400–500 MB | 6–12 分钟 |
 
-容器建议预留 768 MB–1 GB；复杂页面、登录流程、更多并发或 gVisor 环境应直接按 1 GB 以上规划。实际占用受页面复杂度、Chromium 版本、并发数和失败重试影响。
+容器默认限制为 2 GB，单 Chromium 的常规峰值通常在 400–500 MB；复杂页面、登录流程或 gVisor 环境应通过 `docker stats` 复核。实际占用受页面复杂度、Chromium 版本和失败重试影响。
 
 只要一轮扫描远小于 20 分钟，就不会有目标因调度延迟而休眠。
 
@@ -232,9 +232,12 @@ blitz-keepalive/
 ├── keepalive.mjs                 # 主程序：调度、并发池、单实例锁、重试、日志、健康检查服务
 ├── config.example.json           # 多账号 / 多应用配置模板
 ├── .env.example                  # 环境变量模板
-├── Dockerfile                    # 可部署到 blitz.cloud 的镜像（内置 Chromium + /healthz）
-├── compose.yaml                  # 两个容器互相保活的本地示例
+├── Dockerfile                    # 可部署到 blitz.cloud 的镜像（内置 Chromium + /healthz + /readyz）
+├── compose.yaml                  # 单容器本地部署示例
+├── compose.server.yaml           # Nginx + 单应用容器的生产服务器部署
 ├── deploy/
+│   ├── server/nginx.conf.example # 宿主机 Nginx 反向代理配置模板
+│   ├── server/.env.example       # 生产环境变量模板
 │   ├── windows/install-task.ps1  # 注册计划任务 / Startup 启动器
 │   ├── windows/uninstall-task.ps1
 │   ├── linux/blitz-keepalive.service
@@ -290,10 +293,10 @@ node keepalive.mjs --config=config.json --once
 设置端口和访问密码即可启动管理控制台：
 
 ```powershell
-node keepalive.mjs --port=8080 --admin-password="换成足够长的随机密码"
+node keepalive.mjs --port=8090 --admin-password="换成足够长的随机密码"
 ```
 
-打开 `http://127.0.0.1:8080/admin`，登录后可以添加、编辑、删除网页目标，为单个目标配置后台访问密码，并查看下一次执行时间、最近巡检结果和进程日志。目标默认保存在 `data/managed-targets.json`；新增目标约 1 秒后会进行首次巡检。登录后点击“安全设置”可以修改管理密码，修改成功后其他旧会话会立即失效。
+打开 `http://127.0.0.1:8090/admin`，登录后可以添加、编辑、删除网页目标，为单个目标配置后台访问密码，并查看下一次执行时间、最近巡检结果和进程日志。目标默认保存在 `data/managed-targets.json`；新增目标约 1 秒后会进行首次巡检。登录后点击“安全设置”可以修改管理密码，修改成功后其他旧会话会立即失效。
 
 网页修改的管理密码以 scrypt 哈希保存到 `data/admin-auth.json`，不会保存明文。该文件存在时优先于 `ADMIN_PASSWORD`，因此重启后仍使用网页中设置的新密码；如需重新以环境变量初始化，请先删除或更换密码文件。目标后台访问密码则使用独立的 AES-256-GCM 密钥文件加密，需与目标数据一起持久化和备份。
 
@@ -316,7 +319,7 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 `
 powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 -Config config.json
 ```
 
-- 默认启动管理后台 `http://127.0.0.1:8080/admin`，首次登录后添加目标；可用 `-Port` 修改端口。
+- 默认启动管理后台 `http://127.0.0.1:8090/admin`，首次登录后添加目标；可用 `-Port` 修改端口。
 - 会写入 `.env`、注册 `BlitzKeepAlive` 计划任务并立即启动。
 - 以 SYSTEM 身份开机启动（无需登录）：追加 `-RunAsSystem`。
 - 无管理员权限时用 `-StartupFolder`：在当前用户 Startup 目录放一个隐藏启动器，登录后自动运行。
@@ -337,7 +340,7 @@ sudo useradd -r -s /usr/sbin/nologin blitzkeep
 sudo mkdir -p /opt/blitz-keepalive && sudo chown blitzkeep: /opt/blitz-keepalive
 # 把本目录内容拷到 /opt/blitz-keepalive，然后
 cd /opt/blitz-keepalive && npm install --omit=dev
-cp .env.example .env && vi .env        # 设置 PORT、ADMIN_PASSWORD；目标稍后在 /admin 添加
+cp .env.example .env && vi .env        # 设置 PORT=8090、ADMIN_PASSWORD；目标稍后在 /admin 添加
 sudo cp deploy/linux/blitz-keepalive.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now blitz-keepalive
@@ -369,114 +372,361 @@ ExecStart=/usr/bin/xvfb-run -a /usr/bin/node keepalive.mjs
 - 不同工作目录天然使用不同的 `keepalive.lock`，互不影响；
 - 同一台机器想跑两个独立实例时，显式指定 `--lock-file` 和 `--log-dir` 区分。
 
-## 8. Docker 部署：两个账号相互保活
+## 8. 在自己的服务器上部署（推荐：复用宿主机 Nginx）
 
-### 8.1 可行性与边界
+### 8.1 生产拓扑与取舍
 
-技术上可行：容器里跑真实 Chromium，访问**对端账号**应用的公网地址；对端在休眠时会被这次浏览器访问唤醒（约 10 秒）。但有三条硬边界：
-
-1. **容器必须监听端口**。blitz.cloud 只有在镜像的端口可连接后才把应用标为 Online（[文档](https://blitz.cloud/docs/deploy-docker-image/)）。本镜像内置了 `GET /healthz`，默认 `EXPOSE 8080`，不依赖浏览器状态，因此启动后立刻可被判定为在线。
-2. **相互保活存在死锁窗口**。A 的容器访问 B、B 的容器访问 A，前提是至少一方醒着。如果两个应用**同时**休眠（同时部署、平台重启、双双连续失败超过 30 分钟），两边容器都停止，谁也唤醒不了谁，只能人工打开其中一个。部署完成后请立刻手动访问两个应用一次。
-3. **判定方式未公开**。blitz 是否把「来自 blitz 容器 IP 的浏览器访问」算作访客，官方没有说明。首次上线后必须验证：日志出现 `"ok":true`，且 dashboard 的 Activity 里有 wake 记录；如果一直被判定为程序请求，这套拓扑就不成立。
-
-资源现实：镜像约 0.9 GB（本地解压后，实际下载大小以 registry 为准；官方 Playwright 基础镜像 + 完整 Chromium），单次访问峰值内存约 420 MB，空闲时明显更低。免费版每账号 512 MB 预留池，可能偏紧；blitz 有 burst 上限，但没有 SLA 保证。两个账号各跑一个 Chromium 时请留意 OOM 与启动耗时。
-
-### 8.2 构建并推送镜像
-
-镜像必须是 **公开** 的，且为 `linux/amd64`：
-
-```bash
-docker buildx build --platform linux/amd64 \
-  -t <你的DockerHub用户名>/blitz-keepalive:1.0.0 --push .
-```
-
-用固定版本标签（`1.0.0`）而不是 `latest`，避免 blitz 的夜间自动更新在你不知情时换版本。
-
-本仓库的 Dockerfile 使用官方 Playwright 镜像并固定镜像 digest，构建阶段不访问 Alpine `apk` 软件源，因此更适合 blitz 云端构建器。容器默认设置 `CHROME_NO_SANDBOX=true` 以兼容 Docker/gVisor 的沙箱限制；进程仍以非 root 用户 `pwuser` 运行，部署时应保留 `no-new-privileges` 等容器隔离措施。
-
-镜像默认提供 `TRUST_PROXY_CIDRS=127.0.0.1/32,::1/128`，用于兼容 blitz 启用 `TRUST_PROXY=true` 的启动校验。若实际反向代理不是从回环地址连接，请通过 blitz 环境变量覆盖为代理的真实 CIDR；不要把不受控的公网网段加入信任列表。
-
-### 8.3 部署到两个账号
-
-账号 A 的应用（例如 `keeper-a`）：
-
-| 设置 | 值 |
-| --- | --- |
-| 镜像 | `<user>/blitz-keepalive:1.0.0` |
-| 端口 | `8080` |
-| `INTERVAL_MIN` / `JITTER_MIN` | `20` / `2`（两边错开，例如一边 18/3） |
-| `ADMIN_PASSWORD` | 管理网页登录密码；使用强随机值，并通过 HTTPS 访问 |
-| `ADMIN_PASSWORD_FILE` | `/app/data/admin-auth.json`；网页修改后的 scrypt 密码哈希，优先于环境变量 |
-| `MANAGED_TARGETS_FILE` | `/app/data/managed-targets.json` |
-| `STATUS_TOKEN` | 可选只读 API 令牌；通过请求头使用，不能登录管理台或执行写操作 |
-
-同时把持久化卷挂载到 `/app/data`，否则容器重建后网页中添加的目标和修改后的管理密码都会丢失：
+生产环境只运行一个应用容器，复用服务器上已有的 Nginx：
 
 ```text
-/app/data -> 持久化卷
+Internet
+   │  80 / 443
+   ▼
+┌──────────────────────────┐
+│ 宿主机 Nginx             │  TLS、证书、反向代理、安全响应头
+└────────────┬─────────────┘
+             │ http://127.0.0.1:8090
+             ▼
+┌──────────────────────────┐
+│ keepalive 容器           │  Node + Chromium
+└──────────────────────────┘
+             │
+             ├── ./data：目标、密码哈希、加密密钥、运行态
+             └── ./logs：运行日志和失败现场
 ```
 
-本地 `compose.yaml` 已为两个服务分别挂载 `./data/peer-a` 和 `./data/peer-b`。首次启动应通过 `PEER_A_ADMIN_PASSWORD` / `PEER_B_ADMIN_PASSWORD` 或 blitz 环境变量设置强密码；之后也可复用卷中已存在的 `admin-auth.json`。两者都不存在时容器会因 `PORT requires ADMIN_PASSWORD` 校验而拒绝启动。
+- Nginx 继续使用宿主机的 `80/443`，不需要额外启动第二个反向代理容器。
+- 应用只把 `8090` 发布到宿主机回环地址 `127.0.0.1`，公网无法绕过 Nginx 直连应用。
+- 现有 Nginx 可以继续承载其他站点；为保活后台增加一个独立的 `server_name` 虚拟主机即可。
+- 代价是证书申请和续期由 Nginx/Certbot 维护；如果服务器已有证书体系，这通常比再引入一套代理更简单。
+- 不要把应用端口写成 `8090:8090`，也不要让其他反向代理占用同一个 `80/443` 端口。
 
-账号 B 的应用（`keeper-b`）同样配置。部署完成后分别打开两个应用的 `/admin`，登录后把**对端**应用的公网 URL 添加到目标列表；目标保存在持久化卷中，重启不会丢失。
+资源建议：
 
-部署完成后访问 `https://keeper-a.alice.blitz.cloud/healthz`，应返回：
+| `MAX_CONCURRENT` | 建议内存 | 说明 |
+| --- | ---: | --- |
+| `1` | 2 GB | 默认生产配置，只运行一个 Chromium |
+| `2` | 4 GB | 仅明确需要提高吞吐时使用 |
+| `3` 及以上 | 8 GB+ | 每个 Chromium 实例都会增加内存尖峰 |
 
-```json
-{"status":"ok","targetCount":0,"visits":0,"failures":0,"lastVisitAt":null,"lastTarget":null,"uptimeSec":900}
-```
+应用镜像约 3.76 GB，另需为数据、日志和 Docker 构建缓存预留空间；生产机至少准备 5 GB 可用磁盘，建议 10 GB。空闲时应用通常只占数百 MB，单次访问峰值约 420 MB；Nginx 的内存占用通常远低于 100 MB。Chromium 还会占用共享内存；当前默认配置为 2 GB 内存上限和 `512mb` 共享内存。
 
-使用 `curl -H "X-Status-Token: <token>" https://keeper-a.alice.blitz.cloud/status` 可以查看每个目标的 `nextDue`、`lastResult`、`consecutiveFailures`，用于确认访问节奏。不要把令牌放进 URL。
+### 8.2 前置条件
 
+1. 一台 Linux x86_64 服务器，已安装 Docker Engine 和 Docker Compose v2。
+2. 服务器已安装并运行 Nginx `>= 1.25.1`（示例使用 `http2 on;`），且当前配置通过 `sudo nginx -t`。
+3. 一个域名，例如 `keepalive.example.com`，A/AAAA 记录指向服务器公网 IP。
+4. 防火墙和云安全组放行 `80/tcp`、`443/tcp`；证书续期通常也需要 `80/tcp`。
+5. 如果 Nginx 已为其他域名提供服务，不要覆盖原有配置；新增 `server_name` 虚拟主机即可。
+6. 不要同时运行其他占用 `80/443` 的反向代理。Nginx 可以与其他站点共存，但同一个 IP 端口只能有一个监听进程。
 
-### 8.3.1 运行时提示 `Cannot find module '/app/keepalive.mjs'` 时
+以下步骤假设 Nginx 直接安装在宿主机。如果 Nginx 本身运行在容器中，应让 Nginx 与应用加入同一个 Docker 网络，把 `proxy_pass` 改为应用服务名，并重新确认代理来源 CIDR。
 
-这不是目标地址配置问题，而是 Blitz 实际启动的镜像或启动命令没有使用当前 Dockerfile。请按顺序检查：
+### 8.3 准备持久化目录和配置
 
-1. 确认 Blitz 的构建提交包含本仓库最新的 `Dockerfile`，并重新触发部署；不要继续使用旧提交（例如 `406fd8d`）。
-2. 在应用的高级设置中检查启动命令覆盖项。推荐留空以使用 Dockerfile 的 `CMD`；如需显式填写，使用 `node /app/keepalive.mjs`，不要填写旧路径或旧脚本名。
-3. 构建日志中应能看到 `COPY keepalive.mjs /app/keepalive.mjs`，且构建阶段的入口文件校验通过；若校验失败，说明部署的提交或构建上下文不包含 `keepalive.mjs`。
-4. 运行环境只需配置 `ADMIN_PASSWORD`（或已持久化的 `ADMIN_PASSWORD_FILE`）；不要再配置 `BLITZ_URL`。保活地址登录 `/admin` 后添加。
-5. 确认 `/app/data` 已挂载到 Blitz 持久化卷，否则后台目标和修改后的密码会在重建后丢失。
-
-### 8.4 加固建议
-
-- **自访问**：在 `/admin` 中把自身 URL 也加进目标列表，对端故障时至少自己还能维持自己醒着。
-- **外部看门狗**：另一台机器（或上一节的独立 agent）每 30 分钟打开一次任一应用，专门用于打破「双双休眠」。
-- **错开节奏**：两边 `INTERVAL_MIN` / `JITTER_MIN` 不同，避免同一时刻互相访问、也降低规律性。
-- **部署后手动访问**：部署/更新窗口是两个应用最可能同时休眠的时刻。
-
-### 8.5 更稳的拓扑：后台应用（推荐）
-
-把同一个镜像部署为账号 A 的「Runs in the background」应用（无地址、永不睡眠），让它同时访问 A、B 两个账号的业务应用；账号 B 只放业务应用。这样：
-
-- 没有相互依赖，**不存在死锁**；
-- 只用一个容器，资源占用减半；
-- 代价是占用免费版唯一的后台 worker 名额，且 2 天无账号活动会被停止（需定期登录/部署/看 dashboard，或升级 Pro）。
-
-### 8.6 本地验证两个容器互相保活
-
-`compose.yaml` 就是两容器互访的骨架；本地可用模拟服务器验证：
+在仓库根目录执行：
 
 ```bash
-docker network create keepalive-test
-docker run -d --name fake-a --network keepalive-test -e BIND=0.0.0.0 \
-  -v "$PWD/test:/app/test:ro" node:22-alpine node /app/test/fake-blitz.mjs 8787
-docker run -d --name fake-b --network keepalive-test -e BIND=0.0.0.0 \
-  -v "$PWD/test:/app/test:ro" node:22-alpine node /app/test/fake-blitz.mjs 8788
-docker run -d --name ka-a --network keepalive-test -p 8091:8080 \
-  -e ADMIN_PASSWORD="local-test-password" \
-  -e TARGET_URL_ALLOWLIST=fake-b -e TARGET_URL_ALLOW_PRIVATE=true \
-  -e INTERVAL_MIN=1 -e JITTER_MIN=0 -e SETTLE_SEC=1 blitz-keepalive:local
-docker run -d --name ka-b --network keepalive-test -p 8092:8080 \
-  -e ADMIN_PASSWORD="local-test-password" \
-  -e TARGET_URL_ALLOWLIST=fake-a -e TARGET_URL_ALLOW_PRIVATE=true \
-  -e INTERVAL_MIN=1 -e JITTER_MIN=0 -e SETTLE_SEC=1 blitz-keepalive:local
+sudo mkdir -p data logs backups
+sudo chown -R 1001:1001 data logs
+sudo chmod 700 data logs
+
+cp deploy/server/.env.example deploy/server/.env
+chmod 600 deploy/server/.env
 ```
 
-启动后分别打开 `http://127.0.0.1:8091/admin` 和 `http://127.0.0.1:8092/admin`，登录后把 `http://fake-b:8788/` / `http://fake-a:8787/` 添加到各自目标列表。
+编辑 `deploy/server/.env`，至少修改：
 
-注意：模拟器走的是明文 HTTP，Chrome 对非安全来源不发 `Sec-Fetch-*`，所以模拟器用 `Upgrade-Insecure-Requests` 作为回退判据；真实的 `https://*.blitz.cloud` 一定带 `Sec-Fetch-Mode: navigate`。
+```dotenv
+KEEPALIVE_HTTP_PORT=8090
+ADMIN_PASSWORD=使用密码管理器生成的长随机密码
+```
+
+`KEEPALIVE_HTTP_PORT` 是宿主机回环映射端口；如果修改它，必须同步修改 Nginx 的 `proxy_pass` 地址。`ADMIN_PASSWORD` 只在首次启动且 `data/admin-auth.json` 不存在时用于初始化。登录 `/admin` 后可以在“安全设置”中修改密码；修改后以持久化的 scrypt 哈希文件为准。不要提交 `deploy/server/.env`，也不要把它复制进镜像。
+
+默认生产配置只运行一个 Chromium，并限制为 2 GB 内存和 512 MB 共享内存：
+
+```dotenv
+KEEPALIVE_MEM_LIMIT=2g
+KEEPALIVE_SHM_SIZE=512mb
+MAX_CONCURRENT=1
+```
+
+`compose.server.yaml` 会将生产容器的 `MAX_CONCURRENT` 固定为 `1`，避免已有 `.env` 意外恢复为多浏览器并发。需要提高吞吐时，应先根据 `docker stats` 和 `/metrics` 实测结果调整资源上限，再显式修改 Compose 配置。
+
+应用容器固定以 UID/GID `1001:1001` 运行，所以 `data` 和 `logs` 必须可写。若服务器上的 UID/GID 规则不同，请调整 Dockerfile 或挂载目录的所有者，不能简单改成 `chmod 777`。
+
+生产环境保留以下代理设置：
+
+```dotenv
+REQUIRE_HTTPS=true
+TRUST_PROXY=true
+TRUST_PROXY_CIDRS=127.0.0.1/32,172.31.0.1/32
+```
+
+`TRUST_PROXY_CIDRS` 必须与 Docker 实际看到的代理来源一致。`compose.server.yaml` 使用固定网关 `172.31.0.1`，同时保留 `127.0.0.1` 以兼容 Docker Desktop/userland-proxy。若修改了 Compose 网络子网，必须同步修改此值。
+
+### 8.4 配置 Nginx
+
+仓库提供了完整示例：`deploy/server/nginx.conf.example`。将其复制到 Nginx 的配置目录，并替换域名和证书路径：
+
+```bash
+sudo cp deploy/server/nginx.conf.example /etc/nginx/conf.d/keepalive.conf
+sudo editor /etc/nginx/conf.d/keepalive.conf
+```
+
+至少修改：
+
+```nginx
+server_name keepalive.example.com;
+
+ssl_certificate     /etc/letsencrypt/live/keepalive.example.com/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/keepalive.example.com/privkey.pem;
+```
+
+示例配置包含：
+
+- `80` 到 `443` 的跳转；
+- TLS 1.2/1.3 和 HSTS；
+- 覆盖客户端伪造的 `X-Forwarded-*` 头；
+- 将请求转发到 `127.0.0.1:8090`；
+- `nosniff`、`X-Frame-Options: DENY` 等安全响应头；
+- 对 `/api/login` 做每 IP `10r/m`、`burst=5` 的 Nginx 限流；
+- 默认只允许宿主机访问 `/readyz`，避免公开目标 ID 和运行状态。
+
+如果证书还不存在，可以使用 Certbot（以 Debian/Ubuntu 为例）：
+
+```bash
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d keepalive.example.com
+```
+
+Certbot 可能会修改 Nginx 配置；申请成功后再次检查证书路径和 `nginx -t`。如果已有其他 ACME 客户端或证书，直接使用对应证书路径即可。
+
+每次修改 Nginx 配置后执行：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+#### 可选：用 fail2ban 封禁反复失败来源
+
+Nginx 的 `limit_req` 负责限速，fail2ban 负责在多次 `401/429` 后临时封禁来源 IP。Debian/Ubuntu 可按以下方式安装示例规则：
+
+```bash
+sudo apt install fail2ban
+sudo install -Dm644 deploy/server/fail2ban/filter.d/blitz-keepalive.conf \
+  /etc/fail2ban/filter.d/blitz-keepalive.conf
+sudo install -Dm644 deploy/server/fail2ban/jail.local.example \
+  /etc/fail2ban/jail.d/blitz-keepalive.local
+sudo fail2ban-client -t
+sudo systemctl restart fail2ban
+sudo fail2ban-client status blitz-keepalive
+```
+
+示例规则读取 `/var/log/nginx/blitz-keepalive.access.log`，10 分钟内失败 5 次封禁 1 小时。若修改了 Nginx 的 `access_log` 路径，必须同步修改 jail 配置；启用前先确认日志中确实记录 `POST /api/login` 的 `401/429` 响应。
+
+#### 可选：再增加一层访问控制
+
+应用自身的登录密码不能被替代。需要更强边界时，可选择：
+
+- **Nginx Basic Auth**：`sudo apt install apache2-utils`，创建 `/etc/nginx/.htpasswd`，在 `location = /api/login` 和 `location /` 中加入 `auth_basic "Blitz Keepalive";` 与 `auth_basic_user_file /etc/nginx/.htpasswd;`。这是第二层保护，不要把唯一密码只放在 Basic Auth。
+- **Cloudflare Access**：把源站限制为只接受 Cloudflare 回源，使用 Tunnel 或锁定 Cloudflare IP 段，再配置 Access 策略；不要无条件信任公网客户端传来的 `X-Forwarded-*`。
+- **IP 白名单**：在防火墙或 Nginx 的 `allow`/`deny` 中只允许固定办公 IP 或 VPN 网段。动态 IP 场景不建议长期使用。
+
+无论采用哪种方案，`/healthz` 和 `/readyz` 只用于探针，不应把它们作为登录页或公开管理入口。
+
+### 8.5 启动
+
+生产环境优先拉取 CI 发布的不可变镜像，不在服务器上构建：
+
+```bash
+docker compose --env-file deploy/server/.env -f compose.server.yaml pull keepalive
+docker compose --env-file deploy/server/.env -f compose.server.yaml up -d
+```
+
+本地开发或首次验证镜像时才可以临时使用：
+
+```bash
+docker compose --env-file deploy/server/.env -f compose.server.yaml up -d --build
+```
+
+检查状态和日志：
+
+```bash
+docker compose --env-file deploy/server/.env -f compose.server.yaml ps
+docker compose --env-file deploy/server/.env -f compose.server.yaml logs --tail=100 keepalive
+```
+
+本地和公网健康检查：
+
+```bash
+curl -fsS http://127.0.0.1:8090/healthz
+curl -fsS http://127.0.0.1:8090/readyz
+curl -fsS https://keepalive.example.com/healthz
+```
+
+`/healthz` 是存活探针，进程能响应就返回 `200`；`/readyz` 是业务就绪探针，只有所有未暂停目标都处于保活窗口内才返回 `200`，否则返回 `503` 并在响应中给出目标 ID 和原因。示例 Nginx 配置默认只允许宿主机访问 `/readyz`，外部监控需要显式放行监控来源。
+
+`/healthz` 应返回类似：
+
+```json
+{"status":"ok","targetCount":0,"visits":0,"failures":0,"lastVisitAt":null,"lastTarget":null,"uptimeSec":30}
+```
+
+如果 `/readyz` 返回 `503`，先查看管理网页的目标状态、最近日志和 `/metrics`，不要只看容器是否 running。然后打开 `https://keepalive.example.com/admin`，使用管理员密码登录，在后台添加需要保活的地址。目标地址不应再通过环境变量配置。
+
+### 8.6 网络与安全边界
+
+- 只有宿主机 Nginx 发布 `80/443`；应用只监听 `127.0.0.1:8090`。
+- Compose 使用固定私有网络 `blitz-keepalive-private`，应用地址为 `172.31.0.2`，网关为 `172.31.0.1`。
+- Nginx 覆盖 `X-Real-IP`、`X-Forwarded-For` 和 `X-Forwarded-Proto`；应用只信任 `TRUST_PROXY_CIDRS` 中的来源，避免客户端伪造 HTTPS 和客户端 IP。
+- `REQUIRE_HTTPS=true` 已启用；`/healthz` 与 `/readyz` 都在 HTTPS 强制前处理，示例 Nginx 默认只允许本机访问 `/readyz`。
+- 应用容器启用了 `no-new-privileges` 和 `cap_drop: ALL`；不要为了“方便调试”关闭这些限制。
+- 应用日志使用 Docker `json-file`，限制为 `10 MB × 5`。Nginx 访问日志和错误日志由宿主机 Nginx 配置管理。
+- 如果 Nginx 前面还有 CDN，必须先正确配置 Nginx 的 `real_ip` 和可信代理，再把对应地址加入应用的 `TRUST_PROXY_CIDRS`；不要盲目信任整个公网。
+
+检查实际 Docker 网络网关：
+
+```bash
+docker network inspect blitz-keepalive-private \
+  --format '{{(index .IPAM.Config 0).Gateway}}'
+```
+
+如果修改了 `compose.server.yaml` 中的 subnet 或 gateway，必须同时更新 `TRUST_PROXY_CIDRS`，不能只改其中一个。
+
+### 8.7 日常运维、升级与回滚
+
+查看状态、日志和重启：
+
+```bash
+docker compose --env-file deploy/server/.env -f compose.server.yaml ps
+docker compose --env-file deploy/server/.env -f compose.server.yaml logs -f keepalive
+docker compose --env-file deploy/server/.env -f compose.server.yaml restart keepalive
+```
+
+CI 在 `main` 分支和 `v*` 标签上发布 `linux/amd64` 镜像。生产环境使用完整的提交 SHA 作为标签，不使用不可回滚的 `latest`：
+
+```dotenv
+KEEPALIVE_IMAGE_TAG=替换为 CI 输出的 40 位提交 SHA
+```
+
+升级流程：
+
+```bash
+# 仅在 compose 文件或部署脚本也有变化时需要
+git pull --ff-only
+
+docker compose --env-file deploy/server/.env -f compose.server.yaml pull keepalive
+docker compose --env-file deploy/server/.env -f compose.server.yaml up -d
+docker compose --env-file deploy/server/.env -f compose.server.yaml ps
+curl -fsS http://127.0.0.1:8090/readyz
+```
+
+记录当前镜像摘要，便于审计和回滚：
+
+```bash
+docker image inspect ghcr.io/wangming884/blitz-keepalive:${KEEPALIVE_IMAGE_TAG} \
+  --format '{{index .RepoDigests 0}}'
+```
+
+回滚时把 `KEEPALIVE_IMAGE_TAG` 改回上一个已验证的提交 SHA，再执行：
+
+```bash
+docker compose --env-file deploy/server/.env -f compose.server.yaml pull keepalive
+docker compose --env-file deploy/server/.env -f compose.server.yaml up -d
+```
+
+不要用 `docker compose down -v` 做日常升级或回滚，它会删除 Compose 管理的资源。绑定目录中的 `data/` 和 `logs/` 应继续保留。
+
+### 8.8 备份、恢复与恢复演练
+
+网页目标、管理密码哈希、目标密码加密密钥和运行态必须一起备份。应用目录由 UID `1001` 拥有，普通部署用户可能无法读取，因此生产环境用 `sudo bash` 执行脚本，不依赖文件可执行位。
+
+首次部署先创建专用目录和口令文件。备份口令必须与加密归档分开保存，不能放进仓库、`.env` 或应用容器：
+
+```bash
+sudo install -d -m 700 /etc/blitz-keepalive /var/backups/blitz-keepalive
+sudo install -m 600 /dev/null /etc/blitz-keepalive/backup-passphrase
+sudoedit /etc/blitz-keepalive/backup-passphrase
+```
+
+从仓库根目录创建加密备份：
+
+```bash
+sudo bash ./deploy/backup.sh \
+  --data-dir ./data \
+  --output-dir /var/backups/blitz-keepalive \
+  --passphrase-file /etc/blitz-keepalive/backup-passphrase
+```
+
+脚本成功后会删除明文归档，并输出 `.enc` 文件。恢复前先停止应用容器，再把加密归档解密到临时路径：
+
+```bash
+docker compose --env-file deploy/server/.env -f compose.server.yaml stop keepalive
+sudo node deploy/backup-crypto.mjs decrypt \
+  /var/backups/blitz-keepalive/blitz-keepalive-backup-YYYYMMDD-HHMMSS.tar.gz.enc \
+  --passphrase-file /etc/blitz-keepalive/backup-passphrase \
+  --output /tmp/blitz-keepalive-restore.tar.gz
+sudo tar -xzf /tmp/blitz-keepalive-restore.tar.gz -C ./data
+sudo rm -f /tmp/blitz-keepalive-restore.tar.gz
+sudo chown -R 1001:1001 data
+sudo chmod 700 data
+docker compose --env-file deploy/server/.env -f compose.server.yaml start keepalive
+```
+
+恢复演练只解密并校验最新归档，不会写入线上 `data/`：
+
+```bash
+sudo bash ./deploy/server/restore-drill.sh \
+  --backup-dir /var/backups/blitz-keepalive \
+  --passphrase-file /etc/blitz-keepalive/backup-passphrase
+```
+
+建议用 systemd timer 每天自动备份。示例 unit 假设项目位于 `/opt/blitz-keepalive`；如果实际路径不同，必须同时修改 service 中的路径：
+
+```bash
+sudo install -m 644 deploy/server/systemd/blitz-keepalive-backup.service /etc/systemd/system/
+sudo install -m 644 deploy/server/systemd/blitz-keepalive-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now blitz-keepalive-backup.timer
+sudo systemctl start blitz-keepalive-backup.service
+```
+
+Nginx 证书由 Certbot 或现有证书体系管理，不在应用数据备份范围内。建议定期执行：
+
+```bash
+sudo certbot renew --dry-run
+```
+
+### 8.9 部署到 blitz.cloud（可选）
+
+如果只是把本镜像部署到 blitz.cloud，不需要 `compose.server.yaml`，也不需要服务器上的 Nginx。直接使用仓库的 `Dockerfile`，让平台负责构建和 HTTPS：
+
+1. 使用当前提交构建，不要使用旧提交；入口文件必须被复制到 `/app/keepalive.mjs`。
+2. 平台启动命令留空，使用 Dockerfile 的 `CMD ["node", "/app/keepalive.mjs"]`。
+3. 配置 `ADMIN_PASSWORD`，并挂载 `/app/data` 持久化卷；建议同时持久化 `/app/logs`。否则网页添加的目标、修改后的密码和审计日志会在重建后丢失。
+4. 平台端口使用 `8090`，平台存活检查使用 `/healthz`。`/readyz` 用于业务就绪告警；如果平台会把探针公开，不要直接暴露 `/readyz`，应改为受控监控访问。
+5. 不需要配置 `BLITZ_URL`；目标地址由管理员在 `/admin` 添加。
+
+如果平台终止 TLS 并转发到容器，只有确认代理来源 CIDR 后，才设置 `REQUIRE_HTTPS=true`、`TRUST_PROXY=true` 和 `TRUST_PROXY_CIDRS`。不确定代理地址时不要盲目信任整个网段，否则客户端可以伪造转发头。
+
+之前的“两个 blitz 账号互相保活”拓扑不再作为推荐部署方式：它存在双方同时休眠的死锁窗口，也容易把部署问题误判为目标地址问题。多账号场景应优先让一个后台实例管理多个目标；如果必须拆成多个实例，每个实例都应有独立的外部唤醒手段。
+
+### 8.10 常见部署故障
+
+| 现象 | 检查项 |
+| --- | --- |
+| Nginx 配置检查失败 | 执行 `sudo nginx -t`；检查重复的 `server_name`、监听端口和证书路径 |
+| 公网访问返回 `502 Bad Gateway` | 应用是否健康：`docker compose ... ps`；本机 `curl http://127.0.0.1:8090/healthz`；查看 `keepalive` 日志 |
+| 页面返回 `426 Upgrade Required` | `TRUST_PROXY`、`TRUST_PROXY_CIDRS` 是否与 Docker 实际网关一致；Nginx 是否发送 `X-Forwarded-Proto: https` |
+| Nginx 端口被占用 | 检查是否有其他反向代理绑定同一个 `80/443`；停止不用的服务或容器 |
+| 证书申请或续期失败 | DNS 是否指向本机；`80/443` 是否被防火墙、云安全组或 CDN 拦截；执行 `certbot renew --dry-run` |
+| 容器启动后立即退出 | 查看 `docker compose ... logs keepalive`；首次启动通常是没有设置 `ADMIN_PASSWORD` |
+| `Permission denied` 写入 `/app/data` | `data/`、`logs/` 是否属于 UID/GID `1001:1001` |
+| 浏览器访问频繁 OOM | 降低 `MAX_CONCURRENT`，并把 `KEEPALIVE_MEM_LIMIT` 调整到与主机内存匹配 |
+| `Cannot find module '/app/keepalive.mjs'` | 部署的是旧镜像或覆盖了启动命令；重新构建当前提交并清空启动命令 |
 
 ## 9. 验证结果（本机实测）
 
@@ -487,7 +737,7 @@ docker run -d --name ka-b --network keepalive-test -p 8092:8080 \
 5. **配置健壮性**：带 BOM 的 JSON（Windows 记事本 / PowerShell 5.1 生成）可正常读取；非法配置退出码 2。
 6. **程序请求无效**：对模拟服务器发普通 HTTP 请求得到 `503 App is asleep`，与免费版行为一致。
 7. **启动器**：`-StartupFolder` 生成的隐藏启动器可成功拉起进程（测试后已清理）。
-8. **Docker 镜像**：`docker build` 成功（Alpine + Chromium，1.46 GB）；容器内 Chromium 正常启动，`/healthz` 返回 200，单次访问 `ok:true, ms:5417`。
+8. **Docker 镜像**：`docker build` 成功（Playwright 基础镜像 + Chromium，镜像约 3.76 GB）；容器内 Chromium 正常启动，`/healthz` 返回 200，单次访问 `ok:true, ms:5417`。在生产安全限制下（`cap_drop: ALL`、`no-new-privileges`、4 GB 内存、512 PIDs），受限容器仍能完成模拟站点巡检：`ok:true, ms:3261`、容器 `healthy`、目标文件持久化成功。
 9. **容器资源**：访问期间峰值约 420 MB，空闲回落；CPU 仅在访问的几秒内升高。
 10. **相互保活**：两个 agent 容器分别访问对端模拟应用，间隔 1 分钟运行 150 秒，双方各完成 3 次成功访问（`ms` 约 1.4–5.6 秒），没有失败。
 11. **HTTP 代理**：本地 HTTP 代理（`test/fake-proxy.mjs`）验证通过，代理日志确认目标请求为 `GET http://127.0.0.1:8862/`；带 Basic 认证时 `authenticated:true`。HTTPS 目标走 CONNECT，代理日志确认 CONNECT 同样携带认证。
@@ -497,6 +747,7 @@ docker run -d --name ka-b --network keepalive-test -p 8092:8080 \
 15. **目标级代理优先级**：显式代理 → 成功；`proxy: ""` → 直连成功；未配置 → 继承全局（故意设为不可达）→ 按预期失败。
 16. **脱敏**：日志中未出现代理用户名、密码或 `user:pass@` 形式。
 17. **NO_PROXY**：环境变量 `NO_PROXY=127.0.0.1,localhost,::1` 被自动转换为 bypass 列表并生效。
+18. **Nginx 生产链路**：临时启动应用与 Nginx 容器，直连 `/admin` 返回 `426`，经 Nginx 的 `/healthz` 和 `/admin` 均返回 `200`，登录响应包含 `Secure` Cookie；配置通过 `nginx -t`。
 
 未验证项：真实 blitz.cloud 应用（需要你的地址）；Linux/systemd 路径（当前环境为 Windows）；容器在 blitz 的 gVisor 沙箱中的实际内存与启动耗时；「容器访问是否被算作访客」这一关键判定；`https://`（TLS）代理与需要认证的 SOCKS5（Chromium 本身不支持后者）。
 
@@ -518,10 +769,10 @@ docker run -d --name ka-b --network keepalive-test -p 8092:8080 \
 设置 `PORT` 启动 HTTP 服务后，在浏览器打开：
 
 ```text
-http://127.0.0.1:8080/admin
+http://127.0.0.1:8090/admin
 ```
 
-直接访问 `http://127.0.0.1:8080/` 时，如果请求头包含 `Accept: text/html`，也会返回管理网页；脚本/健康检查请求仍会得到 JSON。
+直接访问 `http://127.0.0.1:8090/` 时，如果请求头包含 `Accept: text/html`，也会返回管理网页；脚本/健康检查请求仍会得到 JSON。
 
 管理网页支持：
 
@@ -544,7 +795,7 @@ http://127.0.0.1:8080/admin
 
 `ADMIN_PASSWORD` 或持久化密码文件是管理网页的唯一登录方式。`STATUS_TOKEN` 是只读 API 令牌，只能通过 `X-Status-Token` 或 `Authorization: Bearer` 请求头读取 `/status`、`/metrics`、`/api/overview`、`/api/logs`、`/api/targets/export` 等只读接口；它不能登录 `/admin`、不能修改密码、不能执行暂停/恢复/导入等写操作。查询参数 `?token=...` 已移除。
 
-监听 `PORT` 时如果没有配置 `ADMIN_PASSWORD` 或已存在的 `ADMIN_PASSWORD_FILE`，进程会拒绝启动；只有 `STATUS_TOKEN` 不足以启动管理台。建议生产环境设置 `REQUIRE_HTTPS=true` 并由可信反向代理终止 TLS。`/healthz` 始终允许明文探针；只有直连地址位于 `TRUST_PROXY_CIDRS` 且 `TRUST_PROXY=true` 时，服务才会信任 `X-Forwarded-Proto` 和 `X-Forwarded-For`。
+监听 `PORT` 时如果没有配置 `ADMIN_PASSWORD` 或已存在的 `ADMIN_PASSWORD_FILE`，进程会拒绝启动；只有 `STATUS_TOKEN` 不足以启动管理台。建议生产环境设置 `REQUIRE_HTTPS=true` 并由可信反向代理终止 TLS。`/healthz` 与 `/readyz` 在应用层允许明文探针，示例 Nginx 默认只允许本机访问 `/readyz`；只有直连地址位于 `TRUST_PROXY_CIDRS` 且 `TRUST_PROXY=true` 时，服务才会信任 `X-Forwarded-Proto` 和 `X-Forwarded-For`。
 
 管理 API：
 
@@ -572,7 +823,7 @@ POST   /api/targets/import          # 完整替换网页管理目标
 
 浏览器使用登录 Cookie 调用写接口；脚本可使用 `X-Status-Token: <token>` 或 `Authorization: Bearer <token>` 读取只读接口。令牌不会写入 URL，也不会被管理网页读取。
 
-`/metrics` 使用 Prometheus 文本格式，包含进程存活、目标数、累计访问/失败、活跃浏览器、排队任务、Node.js RSS 和运行时间。未携带会话或 `STATUS_TOKEN` 时返回 `401`；采集器示例：
+`/metrics` 使用 Prometheus 文本格式，包含进程存活、`blitz_keepalive_ready`、目标数、累计访问/失败、活跃浏览器、排队任务、Node.js RSS 和运行时间。目标级指标包括最近成功时间、连续失败数、下次执行时间、暂停状态和调度超时状态；目标级指标带有目标 ID 标签，必须限制 `/metrics` 的访问范围。未携带会话或 `STATUS_TOKEN` 时返回 `401`；采集器示例：
 
 ```text
 Authorization: Bearer <STATUS_TOKEN>
@@ -588,7 +839,7 @@ pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups
 ```
 
 ```bash
-BACKUP_PASSPHRASE='至少 12 个字符的独立备份口令' ./deploy/backup.sh --data-dir ./data --output-dir ./backups
+BACKUP_PASSPHRASE='至少 12 个字符的独立备份口令' bash ./deploy/backup.sh --data-dir ./data --output-dir ./backups
 ```
 
 生产环境优先使用口令文件，避免口令进入 shell 历史或进程环境：
@@ -598,7 +849,7 @@ pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups -
 ```
 
 ```bash
-./deploy/backup.sh --data-dir ./data --output-dir ./backups --passphrase-file ./backup-passphrase.txt
+bash ./deploy/backup.sh --data-dir ./data --output-dir ./backups --passphrase-file ./backup-passphrase.txt
 ```
 
 仅在另一个可信加密层会立即接管文件时，才使用 `-AllowPlaintext` / `--allow-plaintext` 保留明文归档。
@@ -619,7 +870,7 @@ node deploy\backup-crypto.mjs decrypt .\backups\blitz-keepalive-backup-YYYYMMDD-
 Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip -DestinationPath .\data -Force
 ```
 
-不要把旧密钥与另一批目标文件混用。升级前先运行 `npm test`；CI 会对 Node 22/24 执行语法检查、完整冒烟测试、加固回归和高危依赖审计。
+不要把旧密钥与另一批目标文件混用。升级前先运行 `npm test`；CI 会对 Node 22/24 执行语法检查、完整冒烟测试、加固回归和高危依赖审计，并校验生产 Compose 与 Nginx 配置。
 
 ## 11. 风险与注意事项
 
@@ -631,11 +882,11 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 6. **免费版后台应用**：如果你不需要 HTTP 地址，直接选「Runs in the background」，它永不睡眠（免费版仅 2 天无账号活动后停止，点一次 Start 即可恢复）——这比保活更省事。
 7. **OpenCode 内置浏览器**：可以手动打开页面做一次验证，但它没有定时调度能力，不能代替本方案；本方案用独立 Chrome 进程，和 OpenCode 生命周期解耦。
 8. **同一 IP 多账号**：技术上完全可行，但同一出口 IP 在固定节奏下访问多个 blitz 账号，特征更明显。风险敏感时把目标拆到不同机器/网络，并加大抖动。
-9. **Docker 相互保活的死锁**：两个应用同时休眠时没有容器在运行，谁也唤醒不了谁；必须有外部看门狗或人工介入。后台应用拓扑没有这个问题。
+9. **多副本调度**：同一个数据目录只应运行一个应用容器；不要为了“高可用”启动多个会同时写入 `managed-targets.json` 的副本。需要横向扩展时，应把调度器拆成独立服务并增加分布式锁。
 10. **gVisor 沙箱**：blitz 的每个应用跑在 gVisor 中，Chromium 可能更慢、更容易触发内存限制；本机 Docker 测试结果不能等同于 blitz 上的表现。
 11. **代理凭据**：优先用 `PROXY_PASSWORD` 等环境变量，`--proxy-pass` 会出现在进程列表；SOCKS 认证不被 Chromium 支持；Chrome 仍会经代理发出少量后台请求（组件更新、GCM），代理侧会看到这些域名。
 12. **暂停与运行态**：手动暂停和自动认证失败暂停会写入 `runtime-state.json`，重启后继续保持；需要长期停用时仍建议删除目标或移出配置文件，并定期备份运行态文件。
-13. **HTTPS 代理信任**：`REQUIRE_HTTPS=true` 时 `/healthz` 是唯一明文健康探针；只有配置了可信代理 CIDR，服务才接受 `X-Forwarded-Proto: https`，否则反向代理后的请求也会被 426 拒绝。
+13. **HTTPS 代理信任**：`REQUIRE_HTTPS=true` 时 `/healthz` 与 `/readyz` 在应用层允许明文探针，示例 Nginx 默认只允许本机访问 `/readyz`；只有配置了可信代理 CIDR，服务才接受 `X-Forwarded-Proto: https`，否则反向代理后的请求也会被 426 拒绝。
 
 ## 12. 参数速查
 
@@ -647,11 +898,11 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --expect=           页面独有文字（推荐）
 --interval-min=20   访问间隔（1..28，且与 jitter 之和不超过 28）
 --jitter-min=2      随机抖动上限（0..10）
---max-concurrent=2  并发访问数（1..5）
+--max-concurrent=1  并发访问数（默认 1；生产 Compose 固定 1）
 --once              立即访问所有目标一次
 --headless=false    有头模式
 --chrome=<path>     指定 Chrome/Edge
---port=8080         启动 HTTP 服务与管理网页（Docker/blitz 部署必需）
+--port=8090         启动 HTTP 服务与管理网页（Docker/blitz 部署必需）
 --bind-host=127.0.0.1  管理/健康服务监听地址（容器通常用 0.0.0.0）
 --admin-password=... 管理网页登录密码（设置 PORT 时必需）
 --admin-password-file=data/admin-auth.json  持久化 scrypt 密码文件（优先于 --admin-password）
@@ -660,7 +911,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --target-secret-key=...  目标密码加密密钥（32 字节 base64 或 64 位 hex；优先用环境变量）
 --target-secret-key-file=data/target-secrets.key  自动生成/读取的目标密码加密密钥文件
 --status-token=...  只读 API 令牌（不能登录管理台或执行写操作）
---require-https=true  强制管理台和 API 使用 HTTPS；/healthz 除外
+--require-https=true  强制管理台和 API 使用 HTTPS；/healthz 与 /readyz 除外
 --trust-proxy=true  信任可信代理的 X-Forwarded-* 请求头
 --trust-proxy-cidrs=127.0.0.1/32  可信代理地址段（TRUST_PROXY=true 时必填）
 --session-idle-timeout-min=60  管理会话空闲超时（5..720 分钟）

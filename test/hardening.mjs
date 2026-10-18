@@ -190,7 +190,7 @@ function instancePaths(tempDir, label) {
 async function startManagementInstance(
   tempDir,
   label,
-  { extraArgs = [], env = {}, wait = true } = {},
+  { extraArgs = [], env = {}, wait = true, includeMaxConcurrentArg = true } = {},
 ) {
   const paths = instancePaths(tempDir, label);
   await mkdir(paths.directory, { recursive: true });
@@ -209,7 +209,7 @@ async function startManagementInstance(
       `--lock-file=${paths.lockFile}`,
       '--interval-min=20',
       '--jitter-min=0',
-      '--max-concurrent=1',
+      ...(includeMaxConcurrentArg ? ['--max-concurrent=1'] : []),
       '--timeout-sec=15',
       '--wake-wait-sec=5',
       '--settle-sec=0',
@@ -292,8 +292,22 @@ async function main() {
 
     const boundary = await startManagementInstance(tempDir, 'interval-boundary', {
       extraArgs: ['--interval-min=28', '--jitter-min=0'],
+      includeMaxConcurrentArg: false,
+      env: { MAX_CONCURRENT: '' },
     });
     instances.push(boundary);
+    const boundaryCookie = await login(boundary.baseUrl);
+    const boundaryOverview = await request(boundary.baseUrl, '/api/overview', {
+      cookie: boundaryCookie,
+    });
+    assert.equal(boundaryOverview.response.status, 200, boundaryOverview.text);
+    assert.equal(boundaryOverview.data.config.maxConcurrent, 1);
+    checks.push('single-browser-default');
+    const emptyReadiness = await request(boundary.baseUrl, '/readyz');
+    assert.equal(emptyReadiness.response.status, 200, emptyReadiness.text);
+    assert.equal(emptyReadiness.data.ready, true);
+    assert.equal(emptyReadiness.data.issueCount, 0);
+    checks.push('readyz-zero-targets-ready');
     const boundaryElapsed = await stopProcess(boundary.entry, boundary.label);
     assert.ok(boundaryElapsed < 10_000, `boundary instance took ${boundaryElapsed}ms to stop`);
     // Windows does not deliver SIGTERM to child processes; Node terminates them
@@ -310,6 +324,7 @@ async function main() {
     const persisted = instancePaths(tempDir, 'persisted-runtime');
     await mkdir(persisted.directory, { recursive: true });
     const futureDue = new Date(Date.now() + 60 * 60_000).toISOString();
+    const staleSuccess = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
     await writeFile(
       persisted.configFile,
       `${JSON.stringify({
@@ -336,8 +351,8 @@ async function main() {
             pausedUntil: null,
             lastResult: null,
             lastVisit: null,
-            lastSuccessfulVisitAt: null,
-            consecutiveFailures: 0,
+            lastSuccessfulVisitAt: staleSuccess,
+            consecutiveFailures: 3,
             authFailureCount: 0,
             nextDue: futureDue,
           },
@@ -357,6 +372,29 @@ async function main() {
     assert.ok(target);
     assert.equal(target.paused, false);
     assert.equal(target.nextDue, futureDue);
+    assert.equal(overview.data.readiness.ready, false);
+    assert.equal(overview.data.summary.notReadyTargets, 1);
+    assert.equal(target.overdue, false);
+    assert.ok(target.readinessIssues.includes('consecutive-failures'));
+    assert.ok(target.readinessIssues.includes('stale-success'));
+    checks.push('readiness-overview-fields');
+
+    const liveness = await request(managed.baseUrl, '/healthz');
+    assert.equal(liveness.response.status, 200, liveness.text);
+    const notReady = await request(managed.baseUrl, '/readyz');
+    assert.equal(notReady.response.status, 503, notReady.text);
+    assert.equal(notReady.data.ready, false);
+    assert.equal(notReady.data.status, 'not-ready');
+    const notReadyTarget = notReady.data.issues.find((item) => item.id === 'persisted-target');
+    assert.ok(notReadyTarget);
+    assert.ok(notReadyTarget.reasons.includes('consecutive-failures'));
+    assert.ok(notReadyTarget.reasons.includes('stale-success'));
+    for (const secret of ['https://example.blitz.cloud', PASSWORD, STATUS_TOKEN]) {
+      assert.equal(notReady.text.includes(secret), false);
+    }
+    checks.push('healthz-remains-live-when-not-ready');
+    checks.push('readyz-reports-target-readiness-issues');
+    checks.push('readyz-does-not-expose-secrets-or-target-url');
 
     const anonymousMetrics = await request(managed.baseUrl, '/metrics');
     assert.equal(anonymousMetrics.response.status, 401);
@@ -367,6 +405,20 @@ async function main() {
     assert.match(tokenMetrics.response.headers.get('content-type') ?? '', /text\/plain/);
     assert.match(tokenMetrics.text, /blitz_keepalive_up 1/);
     assert.match(tokenMetrics.text, /blitz_keepalive_process_memory_bytes \d+/);
+    assert.match(tokenMetrics.text, /blitz_keepalive_ready 0/);
+    for (const metric of [
+      'blitz_keepalive_target_last_success_timestamp_seconds',
+      'blitz_keepalive_target_consecutive_failures',
+      'blitz_keepalive_target_next_due_timestamp_seconds',
+      'blitz_keepalive_target_paused',
+      'blitz_keepalive_target_overdue',
+    ]) {
+      assert.match(
+        tokenMetrics.text,
+        new RegExp(`${metric}\\{target="persisted-target"\\} [0-9.e+-]+`),
+        metric,
+      );
+    }
     const sessionMetrics = await request(managed.baseUrl, '/metrics', { cookie });
     assert.equal(sessionMetrics.response.status, 200, sessionMetrics.text);
     checks.push('metrics-requires-read-auth');
@@ -396,6 +448,11 @@ async function main() {
     );
     assert.equal(persistedPause.targets['persisted-target'].nextDue, null);
     checks.push('pause-flushed-to-runtime-state');
+    const pausedReadiness = await request(managed.baseUrl, '/readyz');
+    assert.equal(pausedReadiness.response.status, 200, pausedReadiness.text);
+    assert.equal(pausedReadiness.data.ready, true);
+    assert.equal(pausedReadiness.data.activeTargetCount, 0);
+    checks.push('readyz-all-targets-paused-ready');
 
     await stopProcess(managed.entry, managed.label);
     managed = await startManagementInstance(tempDir, 'persisted-runtime', {

@@ -1,0 +1,9 @@
+[blitz-keepalive]
+enabled = true
+filter = blitz-keepalive
+logpath = /var/log/nginx/blitz-keepalive.access.log
+port = http,https
+maxretry = 5
+findtime = 10m
+bantime = 1h
+backend = auto

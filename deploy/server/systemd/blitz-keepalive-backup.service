@@ -1,0 +1,18 @@
+[Unit]
+Description=Encrypted backup for Blitz Keepalive
+Documentation=file:/opt/blitz-keepalive/README.md
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/blitz-keepalive
+ExecStart=/bin/bash /opt/blitz-keepalive/deploy/backup.sh --data-dir /opt/blitz-keepalive/data --output-dir /var/backups/blitz-keepalive --passphrase-file /etc/blitz-keepalive/backup-passphrase
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups/blitz-keepalive

@@ -962,6 +962,28 @@ button:disabled {
   background: var(--panel);
 }
 
+.metric-card[data-state="ready"] {
+  border-color: rgba(77, 226, 197, 0.38);
+  background:
+    linear-gradient(145deg, rgba(77, 226, 197, 0.09), transparent 72%),
+    var(--panel);
+}
+
+.metric-card[data-state="ready"] strong {
+  color: var(--cyan);
+}
+
+.metric-card[data-state="warning"] {
+  border-color: rgba(246, 189, 99, 0.42);
+  background:
+    linear-gradient(145deg, rgba(246, 189, 99, 0.11), transparent 72%),
+    var(--panel);
+}
+
+.metric-card[data-state="warning"] strong {
+  color: var(--amber);
+}
+
 .metric-label {
   color: var(--muted);
   font-size: 0.74rem;

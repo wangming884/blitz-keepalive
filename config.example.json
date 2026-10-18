@@ -11,7 +11,7 @@
     "proxy": "",
     "proxyBypass": ""
   },
-  "maxConcurrent": 2,
+  "maxConcurrent": 1,
   "targets": [
     {
       "id": "alice-blog",

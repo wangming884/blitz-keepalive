@@ -84,6 +84,9 @@ const LOGIN_LOCK_MS = 5 * MINUTE;
 const LOGIN_MAX_FAILURES = 5;
 const AUTH_FAILURE_PAUSE_THRESHOLD = 3;
 const AUTH_FAILURE_PAUSE_MS = 30 * MINUTE;
+const READINESS_FAILURE_THRESHOLD = 3;
+const READINESS_GRACE_MS = 10 * MINUTE;
+const FAILURE_BACKOFF_MAX_MULTIPLIER = 4;
 const TARGET_LOGIN_SUCCESS_SELECTOR_MAX_LENGTH = 300;
 const DEFAULT_TARGET_URL_ALLOWLIST = '*.blitz.cloud';
 const FAILURE_DUMP_CLEANUP_INTERVAL_MS = 6 * 60 * MINUTE;
@@ -1423,7 +1426,7 @@ function loadConfig() {
       args['max-concurrent'] ?? process.env.MAX_CONCURRENT ?? fileConfig.maxConcurrent,
       'maxConcurrent',
       { min: 1, max: 5 },
-    ) ?? 2,
+    ) ?? 1,
     retryDelayMs:
       (toNumber(args['retry-delay-sec'] ?? process.env.RETRY_DELAY_SEC ?? fileDefaults.retryDelaySec, 'retryDelaySec', {
         min: 5,
@@ -2557,7 +2560,56 @@ function publicVisit(visit) {
   };
 }
 
+function targetReadinessIssues(target, now = Date.now()) {
+  if (target.paused) return [];
+
+  const issues = [];
+  const consecutiveFailures = Math.max(0, Number(target.consecutiveFailures) || 0);
+  if (consecutiveFailures >= READINESS_FAILURE_THRESHOLD) {
+    issues.push('consecutive-failures');
+  }
+
+  const nextDue = Number(target.nextDue);
+  if (
+    !target.running &&
+    !target.schedulerQueued &&
+    Number.isFinite(nextDue) &&
+    nextDue > 0 &&
+    now - nextDue > READINESS_GRACE_MS
+  ) {
+    issues.push('schedule-overdue');
+  }
+
+  const lastSuccessfulVisitAt = Date.parse(target.lastSuccessfulVisitAt ?? '');
+  if (
+    Number.isFinite(lastSuccessfulVisitAt) &&
+    now - lastSuccessfulVisitAt >
+      target.intervalMs * FAILURE_BACKOFF_MAX_MULTIPLIER + target.jitterMs + READINESS_GRACE_MS
+  ) {
+    issues.push('stale-success');
+  }
+  return issues;
+}
+
+function buildReadinessPayload(cfg, now = Date.now()) {
+  const activeTargets = cfg.targets.filter((target) => !target.paused);
+  const issues = activeTargets
+    .map((target) => ({ id: target.id, reasons: targetReadinessIssues(target, now) }))
+    .filter((target) => target.reasons.length > 0);
+  const ready = issues.length === 0;
+  return {
+    status: ready ? 'ready' : 'not-ready',
+    ready,
+    checkedAt: new Date(now).toISOString(),
+    targetCount: cfg.targets.length,
+    activeTargetCount: activeTargets.length,
+    issueCount: issues.length,
+    issues,
+  };
+}
+
 function publicTargetRuntime(target) {
+  const readinessIssues = targetReadinessIssues(target);
   return {
     id: target.id,
     account: target.account,
@@ -2573,6 +2625,8 @@ function publicTargetRuntime(target) {
     pauseReason: target.pauseReason ?? null,
     pausedUntil: target.pausedUntil ?? null,
     running: Boolean(target.running),
+    overdue: readinessIssues.includes('schedule-overdue'),
+    readinessIssues,
     proxy: redactProxy(target.proxy),
   };
 }
@@ -2599,15 +2653,26 @@ function buildHealthPayload(status) {
   };
 }
 
+function prometheusLabelValue(value) {
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n');
+}
+
 function buildMetrics(cfg, status, controls) {
   const memory = process.memoryUsage();
   const uptimeSec = Math.max(0, Math.round((Date.now() - Date.parse(status.startedAt)) / 1000));
   const schedulerQueued = cfg.targets.filter((target) => target.schedulerQueued).length;
   const queueLength = schedulerQueued + controls.pendingCount();
-  return [
+  const readiness = buildReadinessPayload(cfg);
+  const lines = [
     '# HELP blitz_keepalive_up Whether the keep-alive process is running.',
     '# TYPE blitz_keepalive_up gauge',
     'blitz_keepalive_up 1',
+    '# HELP blitz_keepalive_ready Whether all active targets are within their keep-alive window.',
+    '# TYPE blitz_keepalive_ready gauge',
+    `blitz_keepalive_ready ${readiness.ready ? 1 : 0}`,
     '# HELP blitz_keepalive_targets Number of configured keep-alive targets.',
     '# TYPE blitz_keepalive_targets gauge',
     `blitz_keepalive_targets ${Math.max(0, Number(status.targetCount) || 0)}`,
@@ -2629,8 +2694,41 @@ function buildMetrics(cfg, status, controls) {
     '# HELP blitz_keepalive_uptime_seconds Process uptime in seconds.',
     '# TYPE blitz_keepalive_uptime_seconds gauge',
     `blitz_keepalive_uptime_seconds ${uptimeSec}`,
-    '',
-  ].join('\n');
+  ];
+
+  lines.push(
+    '# HELP blitz_keepalive_target_last_success_timestamp_seconds Unix timestamp of the last successful target visit.',
+    '# TYPE blitz_keepalive_target_last_success_timestamp_seconds gauge',
+    '# HELP blitz_keepalive_target_consecutive_failures Number of consecutive failed target visits.',
+    '# TYPE blitz_keepalive_target_consecutive_failures gauge',
+    '# HELP blitz_keepalive_target_next_due_timestamp_seconds Unix timestamp when the target is next due.',
+    '# TYPE blitz_keepalive_target_next_due_timestamp_seconds gauge',
+    '# HELP blitz_keepalive_target_paused Whether the target is paused.',
+    '# TYPE blitz_keepalive_target_paused gauge',
+    '# HELP blitz_keepalive_target_overdue Whether the target scheduler is overdue beyond the readiness grace period.',
+    '# TYPE blitz_keepalive_target_overdue gauge',
+  );
+  for (const target of cfg.targets) {
+    const label = `target="${prometheusLabelValue(target.id)}"`;
+    const lastSuccessfulAt = Date.parse(target.lastSuccessfulVisitAt ?? '');
+    const nextDue = Number(target.nextDue);
+    const overdue = targetReadinessIssues(target).includes('schedule-overdue');
+    lines.push(
+      `blitz_keepalive_target_last_success_timestamp_seconds{${label}} ${
+        Number.isFinite(lastSuccessfulAt) ? lastSuccessfulAt / 1000 : 0
+      }`,
+      `blitz_keepalive_target_consecutive_failures{${label}} ${
+        Math.max(0, Number(target.consecutiveFailures) || 0)
+      }`,
+      `blitz_keepalive_target_next_due_timestamp_seconds{${label}} ${
+        Number.isFinite(nextDue) && nextDue > 0 ? nextDue / 1000 : 0
+      }`,
+      `blitz_keepalive_target_paused{${label}} ${target.paused ? 1 : 0}`,
+      `blitz_keepalive_target_overdue{${label}} ${overdue ? 1 : 0}`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 /**
@@ -2936,38 +3034,50 @@ function createTargetManager(cfg, status, controls) {
 }
 
 async function buildOverview(cfg, status, log, controls, admin) {
-  const targets = cfg.targets.map((target) => ({
-    id: target.id,
-    source: target.source ?? 'config',
-    editable: target.source === 'managed',
-    account: target.account,
-    url: target.url,
-    intervalMin: Math.round(target.intervalMs / MINUTE),
-    jitterMin: Math.round(target.jitterMs / MINUTE),
-    expect: target.expectText,
-    expectConfigured: Boolean(target.expectText),
-    loginPasswordConfigured: Boolean(target.loginPasswordConfigured),
-    loginSuccessSelector: target.loginSuccessSelector || null,
-    nextDue: target.nextDue ? new Date(target.nextDue).toISOString() : null,
-    lastResult: target.lastResult,
-    lastVisit: publicVisit(target.lastVisit),
-    lastSuccessfulVisitAt: target.lastSuccessfulVisitAt ?? null,
-    consecutiveFailures: target.consecutiveFailures,
-    authFailureCount: target.authFailureCount ?? 0,
-    paused: Boolean(target.paused),
-    pauseReason: target.pauseReason ?? null,
-    pausedUntil: target.pausedUntil ?? null,
-    running: Boolean(target.running),
-    locked: Boolean(target.managementLocked || target.schedulerQueued),
-    pendingRun: controls.hasPending(target.id),
-    proxy: redactProxy(target.proxy),
-  }));
+  const readiness = buildReadinessPayload(cfg);
+  const targets = cfg.targets.map((target) => {
+    const readinessIssues = targetReadinessIssues(target);
+    return {
+      id: target.id,
+      source: target.source ?? 'config',
+      editable: target.source === 'managed',
+      account: target.account,
+      url: target.url,
+      intervalMin: Math.round(target.intervalMs / MINUTE),
+      jitterMin: Math.round(target.jitterMs / MINUTE),
+      expect: target.expectText,
+      expectConfigured: Boolean(target.expectText),
+      loginPasswordConfigured: Boolean(target.loginPasswordConfigured),
+      loginSuccessSelector: target.loginSuccessSelector || null,
+      nextDue: target.nextDue ? new Date(target.nextDue).toISOString() : null,
+      lastResult: target.lastResult,
+      lastVisit: publicVisit(target.lastVisit),
+      lastSuccessfulVisitAt: target.lastSuccessfulVisitAt ?? null,
+      consecutiveFailures: target.consecutiveFailures,
+      authFailureCount: target.authFailureCount ?? 0,
+      paused: Boolean(target.paused),
+      pauseReason: target.pauseReason ?? null,
+      pausedUntil: target.pausedUntil ?? null,
+      running: Boolean(target.running),
+      overdue: readinessIssues.includes('schedule-overdue'),
+      readinessIssues,
+      locked: Boolean(target.managementLocked || target.schedulerQueued),
+      pendingRun: controls.hasPending(target.id),
+      proxy: redactProxy(target.proxy),
+    };
+  });
   const failing = targets.filter((target) => target.consecutiveFailures > 0).length;
   const visited = targets.filter((target) => target.lastVisit).length;
   const pausedTargets = targets.filter((target) => target.paused).length;
   const authFailures = targets.filter((target) => target.authFailureCount > 0).length;
   const authFailureCount = targets.reduce((sum, target) => sum + target.authFailureCount, 0);
-  const overall = failing > 0 || authFailures > 0 ? 'degraded' : visited > 0 ? 'ok' : 'idle';
+  const overdueTargets = targets.filter((target) => target.overdue).length;
+  const overall =
+    readiness.ready === false || failing > 0 || authFailures > 0
+      ? 'degraded'
+      : visited > 0
+        ? 'ok'
+        : 'idle';
   let storage = null;
   try {
     const info = await statfs(cfg.logDir);
@@ -2986,9 +3096,12 @@ async function buildOverview(cfg, status, log, controls, admin) {
   return {
     generatedAt: new Date().toISOString(),
     overall,
+    readiness,
     summary: {
       totalTargets: targets.length,
       failingTargets: failing,
+      notReadyTargets: readiness.issueCount,
+      overdueTargets,
       pausedTargets,
       authFailures,
       authFailureCount,
@@ -3054,6 +3167,15 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
   // process is not marked unhealthy when TLS terminates at the proxy.
   if (req.method === 'GET' && pathname === '/healthz') {
     sendJson(res, 200, buildHealthPayload(status));
+    return;
+  }
+
+  // Liveness only proves that the process can answer. Readiness reflects
+  // whether every active target remains inside its keep-alive window and is
+  // therefore safe to use for alerting and load-balancer decisions.
+  if (req.method === 'GET' && pathname === '/readyz') {
+    const readiness = buildReadinessPayload(cfg);
+    sendJson(res, readiness.ready ? 200 : 503, readiness);
     return;
   }
 
@@ -3182,6 +3304,12 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
     const clientKey = getClientIp(cfg, req);
     const retryAfterSec = admin.limiter.retryAfterSec(clientKey);
     if (retryAfterSec > 0) {
+      void log({
+        level: 'warn',
+        event: 'login-rate-limited',
+        client: clientKey,
+        retryAfterSec,
+      });
       sendJson(
         res,
         429,
@@ -3233,7 +3361,8 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
       sendText(res, 405, 'method not allowed');
       return;
     }
-    if (!requireAdminAuth()) return;
+    const authentication = requireAdminAuth();
+    if (!authentication) return;
     if (!admin.passwordChangeAvailable) {
       sendJson(res, 400, { error: '当前实例未配置访问密码，无法修改密码。' });
       return;
@@ -3263,7 +3392,12 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
       return;
     }
 
-    void log({ level: 'info', event: 'password-changed' });
+    void log({
+      level: 'info',
+      event: 'password-changed',
+      client: getClientIp(cfg, req),
+      via: authentication.via,
+    });
     sendJson(
       res,
       200,
@@ -3625,10 +3759,18 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
   return finalResult;
 }
 
-function scheduleNext(target) {
+function scheduleNext(target, { failed = false } = {}) {
+  const multiplier = failed
+    ? Math.min(2 ** Math.max(0, target.consecutiveFailures - 1), FAILURE_BACKOFF_MAX_MULTIPLIER)
+    : 1;
   const jitter = target.jitterMs > 0 ? Math.floor(Math.random() * target.jitterMs) : 0;
-  target.nextDue = Date.now() + target.intervalMs + jitter;
+  const delay = Math.min(
+    target.intervalMs * multiplier + jitter,
+    MAX_VISIT_WINDOW_MIN * MINUTE,
+  );
+  target.nextDue = Date.now() + delay;
   runtimeStateStore?.schedule();
+  return delay;
 }
 
 /**
@@ -3662,7 +3804,7 @@ async function runTargets(cfg, targets, log, cycle, status) {
             pausedUntil: target.pausedUntil,
           });
         } else {
-          scheduleNext(target);
+          const delay = scheduleNext(target, { failed: !ok });
           await log({
             level: ok ? 'info' : 'warn',
             event: 'scheduled',
@@ -3670,7 +3812,7 @@ async function runTargets(cfg, targets, log, cycle, status) {
             account: target.account,
             consecutiveFailures: target.consecutiveFailures,
             authFailureCount: target.authFailureCount,
-            nextVisitInMin: Math.round(target.intervalMs / MINUTE),
+            nextVisitInMin: Math.ceil(delay / MINUTE),
           });
         }
         runtimeStateStore?.schedule();

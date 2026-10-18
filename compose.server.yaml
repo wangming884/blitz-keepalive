@@ -1,0 +1,85 @@
+# Production deployment for a single Linux server using the host's Nginx.
+#
+# Topology:
+#   Internet -> host Nginx :80/:443 -> 127.0.0.1:8090 -> keepalive container
+#
+# Pull and start a published image:
+#   docker compose --env-file deploy/server/.env -f compose.server.yaml pull keepalive
+#   docker compose --env-file deploy/server/.env -f compose.server.yaml up -d
+#
+# The build block remains available for local development. Production servers
+# should consume an immutable commit-SHA tag published by CI instead of building.
+#
+# Nginx is managed on the host, not by this Compose file. The application port
+# is published only on loopback so it cannot bypass Nginx from the Internet.
+name: blitz-keepalive
+
+services:
+  keepalive:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${KEEPALIVE_IMAGE:-ghcr.io/wangming884/blitz-keepalive}:${KEEPALIVE_IMAGE_TAG:-latest}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: ${KEEPALIVE_MEM_LIMIT:-2g}
+    shm_size: ${KEEPALIVE_SHM_SIZE:-512mb}
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      INTERVAL_MIN: ${INTERVAL_MIN:-20}
+      JITTER_MIN: ${JITTER_MIN:-2}
+      # This production profile runs exactly one Chromium instance.
+      # Change this deliberately only after reviewing memory and scheduling capacity.
+      MAX_CONCURRENT: "1"
+      SESSION_IDLE_TIMEOUT_MIN: ${SESSION_IDLE_TIMEOUT_MIN:-60}
+      PORT: 8090
+      BIND_HOST: 0.0.0.0
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
+      MANAGED_TARGETS_FILE: /app/data/managed-targets.json
+      RUNTIME_STATE_FILE: /app/data/runtime-state.json
+      TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
+      STATUS_TOKEN: ${STATUS_TOKEN:-}
+      REQUIRE_HTTPS: ${REQUIRE_HTTPS:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      # The source address seen by the app is the Docker bridge gateway when
+      # Nginx connects to the loopback-published port. Keep both addresses so
+      # this also works with Docker Desktop/userland-proxy behavior.
+      TRUST_PROXY_CIDRS: ${TRUST_PROXY_CIDRS:-127.0.0.1/32,172.31.0.1/32}
+      TARGET_URL_ALLOWLIST: ${TARGET_URL_ALLOWLIST:-*.blitz.cloud}
+      TARGET_URL_ALLOW_PRIVATE: ${TARGET_URL_ALLOW_PRIVATE:-false}
+      TARGET_URL_STRICT_SUBRESOURCES: ${TARGET_URL_STRICT_SUBRESOURCES:-false}
+      PROXY_URL: ${PROXY_URL:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+      PROXY_BYPASS: ${PROXY_BYPASS:-}
+      LOG_DIR: /app/logs
+    ports:
+      # Never use "8090:8090": that would expose the app directly to the
+      # Internet and bypass Nginx authentication/TLS controls.
+      - "127.0.0.1:${KEEPALIVE_HTTP_PORT:-8090}:8090"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      keepalive_private:
+        ipv4_address: 172.31.0.2
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  keepalive_private:
+    name: blitz-keepalive-private
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+          gateway: 172.31.0.1
