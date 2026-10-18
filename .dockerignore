@@ -11,5 +11,5 @@ deploy
 config.example.json
 docker-compose*.yml
 compose.yaml
-Dockerfile
-.dockerignore
+artifacts
+.playwright-mcp

@@ -376,7 +376,7 @@ ExecStart=/usr/bin/xvfb-run -a /usr/bin/node keepalive.mjs
 2. **相互保活存在死锁窗口**。A 的容器访问 B、B 的容器访问 A，前提是至少一方醒着。如果两个应用**同时**休眠（同时部署、平台重启、双双连续失败超过 30 分钟），两边容器都停止，谁也唤醒不了谁，只能人工打开其中一个。部署完成后请立刻手动访问两个应用一次。
 3. **判定方式未公开**。blitz 是否把「来自 blitz 容器 IP 的浏览器访问」算作访客，官方没有说明。首次上线后必须验证：日志出现 `"ok":true`，且 dashboard 的 Activity 里有 wake 记录；如果一直被判定为程序请求，这套拓扑就不成立。
 
-资源现实：镜像约 1.46 GB（Alpine + 完整 Chromium），单次访问峰值内存约 420 MB，空闲时明显更低。免费版每账号 512 MB 预留池，可能偏紧；blitz 有 burst 上限，但没有 SLA 保证。两个账号各跑一个 Chromium 时请留意 OOM 与启动耗时。
+资源现实：镜像约 0.9 GB（本地解压后，实际下载大小以 registry 为准；官方 Playwright 基础镜像 + 完整 Chromium），单次访问峰值内存约 420 MB，空闲时明显更低。免费版每账号 512 MB 预留池，可能偏紧；blitz 有 burst 上限，但没有 SLA 保证。两个账号各跑一个 Chromium 时请留意 OOM 与启动耗时。
 
 ### 8.2 构建并推送镜像
 
@@ -388,6 +388,8 @@ docker buildx build --platform linux/amd64 \
 ```
 
 用固定版本标签（`1.0.0`）而不是 `latest`，避免 blitz 的夜间自动更新在你不知情时换版本。
+
+本仓库的 Dockerfile 使用官方 Playwright 镜像并固定镜像 digest，构建阶段不访问 Alpine `apk` 软件源，因此更适合 blitz 云端构建器。容器默认设置 `CHROME_NO_SANDBOX=true` 以兼容 Docker/gVisor 的沙箱限制；进程仍以非 root 用户 `pwuser` 运行，部署时应保留 `no-new-privileges` 等容器隔离措施。
 
 ### 8.3 部署到两个账号
 
@@ -675,4 +677,3 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 node --env-file=.env keepalive.mjs          # 常驻
 node --env-file=.env keepalive.mjs --once   # 单次扫描
 ```
-
