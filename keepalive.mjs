@@ -50,7 +50,9 @@ import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
 const MINUTE = 60_000;
-const MAX_INTERVAL_MIN = 29; // blitz.cloud sleeps after 30 minutes without a visitor
+const MAX_VISIT_WINDOW_MIN = 28; // interval + jitter must stay below blitz.cloud's 30-minute sleep
+const MAX_INTERVAL_MIN = MAX_VISIT_WINDOW_MIN;
+const MAX_JITTER_MIN = 10;
 const LOCK_STALE_MS = 15 * MINUTE;
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
 const MAX_RECENT_LOGS = 100;
@@ -86,6 +88,10 @@ const TARGET_LOGIN_SUCCESS_SELECTOR_MAX_LENGTH = 300;
 const DEFAULT_TARGET_URL_ALLOWLIST = '*.blitz.cloud';
 const FAILURE_DUMP_CLEANUP_INTERVAL_MS = 6 * 60 * MINUTE;
 const TARGET_URL_DNS_CACHE_MS = 60_000;
+const MANAGED_TARGETS_FILE_VERSION = 1;
+const RUNTIME_STATE_FILE_VERSION = 1;
+const RUNTIME_STATE_DEBOUNCE_MS = 250;
+const SHUTDOWN_GRACE_MS = 10_000;
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
 const STATIC_FILES = new Map([
@@ -138,6 +144,9 @@ const DEFAULT_USER_AGENT =
 const scrypt = promisify(scryptCallback);
 
 let stopping = false;
+const ACTIVE_BROWSERS = new Set();
+const STOP_WAITERS = new Set();
+let runtimeStateStore = null;
 
 const PRIVATE_NETWORKS = new BlockList();
 for (const [network, prefix] of [
@@ -171,6 +180,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function requestStop() {
+  if (stopping) return;
+  stopping = true;
+  for (const resolve of STOP_WAITERS) resolve(true);
+  STOP_WAITERS.clear();
+  for (const browser of ACTIVE_BROWSERS) {
+    void browser.close().catch(() => {});
+  }
+}
+
+function waitForStop(ms) {
+  if (stopping) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      STOP_WAITERS.delete(onStop);
+      resolve(false);
+    }, ms);
+    const onStop = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    STOP_WAITERS.add(onStop);
+  });
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -200,6 +234,14 @@ function toNumber(raw, label, { min, max }) {
     throw new Error(`${label} must be a number between ${min} and ${max}, got "${raw}"`);
   }
   return value;
+}
+
+function validateVisitWindow(intervalMin, jitterMin, label = 'intervalMin + jitterMin') {
+  if (intervalMin + jitterMin > MAX_VISIT_WINDOW_MIN) {
+    throw new Error(
+      `${label} must not exceed ${MAX_VISIT_WINDOW_MIN} minutes so a visit always happens before the 30-minute sleep threshold.`,
+    );
+  }
 }
 
 function toBool(raw, fallback) {
@@ -706,6 +748,13 @@ function readManagedTargetsFile(file) {
   } catch (error) {
     throw new Error(`Managed targets file ${file} is not valid JSON: ${error.message}`);
   }
+  if (!Array.isArray(parsed) && parsed !== null && typeof parsed === 'object') {
+    if (parsed.version !== undefined && parsed.version !== MANAGED_TARGETS_FILE_VERSION) {
+      throw new Error(
+        `Managed targets file version ${parsed.version} is not supported (expected ${MANAGED_TARGETS_FILE_VERSION}).`,
+      );
+    }
+  }
   const targets = Array.isArray(parsed) ? parsed : parsed?.targets;
   if (!Array.isArray(targets)) {
     throw new Error('Managed targets file must contain an object with a targets array.');
@@ -737,7 +786,7 @@ async function writeJsonFileAtomic(file, value) {
 
 async function writeManagedTargetsFile(file, records) {
   await writeJsonFileAtomic(file, {
-    version: 1,
+    version: MANAGED_TARGETS_FILE_VERSION,
     updatedAt: new Date().toISOString(),
     targets: records,
   });
@@ -920,8 +969,9 @@ function normalizeTarget(raw, globals, index) {
   );
   const jitterMin = toNumber(raw.jitterMin ?? globals.jitterMin, `targets[${index}].jitterMin`, {
     min: 0,
-    max: 10,
+    max: MAX_JITTER_MIN,
   });
+  validateVisitWindow(intervalMin, jitterMin, `targets[${index}] intervalMin + jitterMin`);
   const id = String(raw.id ?? url.hostname).trim();
   if (!id) throw new Error(`targets[${index}].id is empty.`);
   const loginSuccessSelector = String(raw.loginSuccessSelector ?? '').trim();
@@ -990,6 +1040,7 @@ function pauseTarget(target, reason, until = null) {
   target.pauseReason = String(reason ?? '手动暂停').slice(0, 240);
   target.pausedUntil = until ? new Date(until).toISOString() : null;
   target.nextDue = null;
+  runtimeStateStore?.schedule();
 }
 
 function resumeTarget(target) {
@@ -998,6 +1049,7 @@ function resumeTarget(target) {
   target.pausedUntil = null;
   target.authFailureCount = 0;
   target.nextDue = Date.now() + 1_000;
+  runtimeStateStore?.schedule();
 }
 
 function resumeExpiredPauses(targets) {
@@ -1289,7 +1341,7 @@ function loadConfig() {
     ) ?? 20,
     jitterMin: toNumber(args['jitter-min'] ?? process.env.JITTER_MIN ?? fileDefaults.jitterMin, 'jitterMin', {
       min: 0,
-      max: 10,
+      max: MAX_JITTER_MIN,
     }) ?? 2,
     timeoutSec: toNumber(args['timeout-sec'] ?? process.env.TIMEOUT_SEC ?? fileDefaults.timeoutSec, 'timeoutSec', {
       min: 5,
@@ -1307,6 +1359,7 @@ function loadConfig() {
     expectText: String(args.expect ?? process.env.EXPECT_TEXT ?? fileDefaults.expect ?? ''),
     notReadyPatterns: DEFAULT_NOT_READY_PATTERNS.slice(),
   };
+  validateVisitWindow(globals.intervalMin, globals.jitterMin);
 
   const extraPattern = args['not-ready-regex'] ?? fileDefaults.notReadyRegex;
   if (extraPattern) globals.notReadyPatterns.push(new RegExp(extraPattern, 'i'));
@@ -1352,6 +1405,9 @@ function loadConfig() {
   }
 
   const logDir = path.resolve(args['log-dir'] ?? process.env.LOG_DIR ?? 'logs');
+  const runtimeStateFile = path.resolve(
+    args['runtime-state-file'] ?? process.env.RUNTIME_STATE_FILE ?? path.join('data', 'runtime-state.json'),
+  );
 
   return {
     targets,
@@ -1393,10 +1449,15 @@ function loadConfig() {
       args['target-url-allow-private'] ?? process.env.TARGET_URL_ALLOW_PRIVATE,
       false,
     ),
+    targetUrlStrictSubresources: toBool(
+      args['target-url-strict-subresources'] ?? process.env.TARGET_URL_STRICT_SUBRESOURCES,
+      false,
+    ),
     targetSecretKey,
     targetSecretKeyFile,
     logDir,
     logFile: path.join(logDir, 'keepalive.log'),
+    runtimeStateFile,
     lockFile: path.resolve(args['lock-file'] ?? process.env.LOCK_FILE ?? 'keepalive.lock'),
     dumpFailures: toBool(args['dump-failures'] ?? process.env.DUMP_FAILURES, false),
     failureDumpMaxFiles: toNumber(
@@ -1416,7 +1477,11 @@ async function rotateLog(logFile) {
   try {
     const info = await stat(logFile);
     if (info.size > LOG_ROTATE_BYTES) {
-      await rename(logFile, `${logFile}.1`).catch(() => {});
+      const rotatedFile = `${logFile}.1`;
+      await unlink(rotatedFile).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+      await rename(logFile, rotatedFile);
     }
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
@@ -1462,8 +1527,15 @@ async function acquireLock(cfg) {
       } catch {
         // Corrupted lock file: treat as stale below.
       }
-      const stale = !startedAt || Date.now() - startedAt > LOCK_STALE_MS;
-      if (isProcessAlive(pid) && !stale) return null;
+      // A live PID always owns the lock. Age is only used to decide whether a
+      // damaged lock (or one whose process is gone) is safe to remove. This
+      // prevents a long-running daemon from being displaced after 15 minutes.
+      if (isProcessAlive(pid)) return null;
+      if (!Number.isInteger(pid) || pid <= 0) {
+        const info = await stat(cfg.lockFile).catch(() => null);
+        const stale = !info || Date.now() - info.mtimeMs > LOCK_STALE_MS;
+        if (!stale) return null;
+      }
       await unlink(cfg.lockFile).catch(() => {});
     }
   }
@@ -1472,6 +1544,7 @@ async function acquireLock(cfg) {
 
 function createLogger(cfg) {
   const recent = [];
+  let writeQueue = Promise.resolve();
   const log = async (event) => {
     const entry = { ts: new Date().toISOString(), ...event };
     const line = JSON.stringify(entry);
@@ -1479,15 +1552,106 @@ function createLogger(cfg) {
     console.log(line);
     recent.push(entry);
     if (recent.length > MAX_RECENT_LOGS) recent.splice(0, recent.length - MAX_RECENT_LOGS);
-    try {
-      await appendFile(cfg.logFile, `${line}\n`, 'utf8');
-    } catch (error) {
-      console.error(`failed to write log: ${error.message}`);
-    }
+    writeQueue = writeQueue
+      .then(async () => {
+        await rotateLog(cfg.logFile);
+        await appendFile(cfg.logFile, `${line}\n`, 'utf8');
+      })
+      .catch((error) => {
+        console.error(`failed to write log: ${error.message}`);
+      });
+    await writeQueue;
   };
   log.snapshot = (limit = 50) =>
     recent.slice(-Math.min(Math.max(Number(limit) || 50, 1), MAX_RECENT_LOGS));
   return log;
+}
+
+function createRuntimeStateStore(cfg, log) {
+  let timer = null;
+  let writeQueue = Promise.resolve();
+
+  const snapshot = () => ({
+    version: RUNTIME_STATE_FILE_VERSION,
+    updatedAt: new Date().toISOString(),
+    targets: Object.fromEntries(
+      cfg.targets.map((target) => [
+        target.id,
+        {
+          paused: Boolean(target.paused),
+          pauseReason: target.pauseReason ?? null,
+          pausedUntil: target.pausedUntil ?? null,
+          lastResult: target.lastResult ?? null,
+          lastVisit: publicVisit(target.lastVisit),
+          lastSuccessfulVisitAt: target.lastSuccessfulVisitAt ?? null,
+          consecutiveFailures: Math.max(0, Number(target.consecutiveFailures) || 0),
+          authFailureCount: Math.max(0, Number(target.authFailureCount) || 0),
+          nextDue: Number.isFinite(target.nextDue) ? new Date(target.nextDue).toISOString() : null,
+        },
+      ]),
+    ),
+  });
+
+  const flush = async () => {
+    await writeJsonFileAtomic(cfg.runtimeStateFile, snapshot());
+  };
+
+  const schedule = () => {
+    if (cfg.once) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      writeQueue = writeQueue.then(flush).catch((error) => {
+        void log({ level: 'warn', event: 'runtime-state-write-failed', error: error.message });
+      });
+    }, RUNTIME_STATE_DEBOUNCE_MS);
+    timer.unref?.();
+  };
+
+  return {
+    async load() {
+      if (!existsSync(cfg.runtimeStateFile)) return;
+      let parsed;
+      try {
+        parsed = JSON.parse(readFileSync(cfg.runtimeStateFile, 'utf8').replace(/^\uFEFF/, ''));
+      } catch (error) {
+        throw new Error(`Runtime state file ${cfg.runtimeStateFile} is not valid JSON: ${error.message}`);
+      }
+      if (parsed?.version !== RUNTIME_STATE_FILE_VERSION) {
+        throw new Error(
+          `Runtime state file version ${parsed?.version ?? 'missing'} is not supported (expected ${RUNTIME_STATE_FILE_VERSION}).`,
+        );
+      }
+      if (parsed.targets === null || typeof parsed.targets !== 'object' || Array.isArray(parsed.targets)) {
+        throw new Error('Runtime state file must contain a targets object.');
+      }
+      const byId = new Map(cfg.targets.map((target) => [target.id, target]));
+      for (const [id, state] of Object.entries(parsed.targets)) {
+        const target = byId.get(id);
+        if (!target || state === null || typeof state !== 'object' || Array.isArray(state)) continue;
+        target.paused = state.paused === true;
+        target.pauseReason = target.paused && typeof state.pauseReason === 'string' ? state.pauseReason.slice(0, 240) : null;
+        target.pausedUntil = target.paused && typeof state.pausedUntil === 'string' ? state.pausedUntil : null;
+        target.lastResult = ['ok', 'failed'].includes(state.lastResult) ? state.lastResult : null;
+        target.lastVisit = publicVisit(state.lastVisit);
+        target.lastSuccessfulVisitAt =
+          typeof state.lastSuccessfulVisitAt === 'string' ? state.lastSuccessfulVisitAt : null;
+        target.consecutiveFailures = Math.max(0, Math.trunc(Number(state.consecutiveFailures) || 0));
+        target.authFailureCount = Math.max(0, Math.trunc(Number(state.authFailureCount) || 0));
+        const nextDue = Date.parse(state.nextDue ?? '');
+        target.nextDue = target.paused ? null : Number.isFinite(nextDue) ? nextDue : 0;
+      }
+    },
+    schedule,
+    async flushNow() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      await writeQueue;
+      if (!cfg.once) await flush();
+    },
+  };
 }
 
 function classify(target, state, { requireExpect = true } = {}) {
@@ -1824,6 +1988,7 @@ async function visitOnce(cfg, target) {
     defaultViewport: { width: 1366, height: 900 },
     args,
   });
+  ACTIVE_BROWSERS.add(browser);
 
   const loginState = createLoginVisitState(target);
   try {
@@ -1853,7 +2018,8 @@ async function visitOnce(cfg, target) {
             return;
           }
           const enforceAllowlist =
-            request.isNavigationRequest() && request.frame() === page.mainFrame();
+            cfg.targetUrlStrictSubresources ||
+            (request.isNavigationRequest() && request.frame() === page.mainFrame());
           await validateTargetUrl(request.url(), cfg, { enforceAllowlist });
           await request.continue();
         } catch {
@@ -1957,7 +2123,7 @@ async function visitOnce(cfg, target) {
     await page
       .evaluate(() => window.scrollTo(0, Math.min(200, document.body.scrollHeight)))
       .catch(() => {});
-    await sleep(target.settleMs);
+    await waitForStop(target.settleMs);
 
     return {
       ok: true,
@@ -1967,6 +2133,7 @@ async function visitOnce(cfg, target) {
       ...loginState,
     };
   } finally {
+    ACTIVE_BROWSERS.delete(browser);
     await browser.close().catch(() => {});
   }
 }
@@ -2011,10 +2178,10 @@ function sendJson(res, statusCode, body, extraHeaders = {}) {
   res.end(payload);
 }
 
-function sendText(res, statusCode, body) {
+function sendText(res, statusCode, body, contentType = 'text/plain; charset=utf-8') {
   res.writeHead(statusCode, {
     ...SECURITY_HEADERS,
-    'content-type': 'text/plain; charset=utf-8',
+    'content-type': contentType,
     'cache-control': 'no-store',
   });
   res.end(body);
@@ -2427,6 +2594,40 @@ function buildHealthPayload(status) {
   };
 }
 
+function buildMetrics(cfg, status, controls) {
+  const memory = process.memoryUsage();
+  const uptimeSec = Math.max(0, Math.round((Date.now() - Date.parse(status.startedAt)) / 1000));
+  const schedulerQueued = cfg.targets.filter((target) => target.schedulerQueued).length;
+  const queueLength = schedulerQueued + controls.pendingCount();
+  return [
+    '# HELP blitz_keepalive_up Whether the keep-alive process is running.',
+    '# TYPE blitz_keepalive_up gauge',
+    'blitz_keepalive_up 1',
+    '# HELP blitz_keepalive_targets Number of configured keep-alive targets.',
+    '# TYPE blitz_keepalive_targets gauge',
+    `blitz_keepalive_targets ${Math.max(0, Number(status.targetCount) || 0)}`,
+    '# HELP blitz_keepalive_visits_total Total completed target visits since process start.',
+    '# TYPE blitz_keepalive_visits_total counter',
+    `blitz_keepalive_visits_total ${Math.max(0, Number(status.visits) || 0)}`,
+    '# HELP blitz_keepalive_failures_total Total failed target visits since process start.',
+    '# TYPE blitz_keepalive_failures_total counter',
+    `blitz_keepalive_failures_total ${Math.max(0, Number(status.failures) || 0)}`,
+    '# HELP blitz_keepalive_active_browsers Number of browser processes currently active.',
+    '# TYPE blitz_keepalive_active_browsers gauge',
+    `blitz_keepalive_active_browsers ${ACTIVE_BROWSERS.size}`,
+    '# HELP blitz_keepalive_queue_length Targets queued for scheduling or manual runs.',
+    '# TYPE blitz_keepalive_queue_length gauge',
+    `blitz_keepalive_queue_length ${queueLength}`,
+    '# HELP blitz_keepalive_process_memory_bytes Node.js process RSS memory.',
+    '# TYPE blitz_keepalive_process_memory_bytes gauge',
+    `blitz_keepalive_process_memory_bytes ${Math.max(0, Number(memory.rss) || 0)}`,
+    '# HELP blitz_keepalive_uptime_seconds Process uptime in seconds.',
+    '# TYPE blitz_keepalive_uptime_seconds gauge',
+    `blitz_keepalive_uptime_seconds ${uptimeSec}`,
+    '',
+  ].join('\n');
+}
+
 /**
  * Manual checks are queued in memory and picked up by the scheduler. Keeping
  * them separate from nextDue prevents a request that arrives during a running
@@ -2469,6 +2670,9 @@ function createRunController(cfg) {
     },
     hasPending(id) {
       return pending.has(id);
+    },
+    pendingCount() {
+      return pending.size;
     },
   };
 }
@@ -2533,6 +2737,7 @@ function createTargetManager(cfg, status, controls) {
         target.nextDue = Date.now() + 1_000;
         cfg.targets.push(target);
         status.targetCount = cfg.targets.length;
+        runtimeStateStore?.schedule();
         return { target, record };
       });
     },
@@ -2574,6 +2779,7 @@ function createTargetManager(cfg, status, controls) {
             target.nextDue = Date.now() + 1_000;
           }
           cfg.targets.splice(index, 1, target);
+          runtimeStateStore?.schedule();
           return { target, record };
         } finally {
           current.managementLocked = false;
@@ -2591,6 +2797,7 @@ function createTargetManager(cfg, status, controls) {
           await persist(nextRecords);
           cfg.targets.splice(index, 1);
           status.targetCount = cfg.targets.length;
+          runtimeStateStore?.schedule();
           return current;
         } finally {
           current.managementLocked = false;
@@ -2604,6 +2811,7 @@ function createTargetManager(cfg, status, controls) {
         target.managementLocked = true;
         try {
           pauseTarget(target, '手动暂停');
+          runtimeStateStore?.schedule();
           return target;
         } finally {
           target.managementLocked = false;
@@ -2618,6 +2826,7 @@ function createTargetManager(cfg, status, controls) {
         try {
           await validateTargetUrl(target.url, cfg);
           resumeTarget(target);
+          runtimeStateStore?.schedule();
           return target;
         } finally {
           target.managementLocked = false;
@@ -2714,6 +2923,7 @@ function createTargetManager(cfg, status, controls) {
         cfg.targets.splice(0, cfg.targets.length, ...staticTargets, ...nextTargets);
         cfg.managedRecords = nextRecords;
         status.targetCount = cfg.targets.length;
+        runtimeStateStore?.schedule();
         return { imported: nextTargets.length, targets: nextTargets };
       });
     },
@@ -2786,6 +2996,9 @@ async function buildOverview(cfg, status, log, controls, admin) {
     runtime: {
       memoryUsage: process.memoryUsage(),
       storage,
+      activeBrowsers: ACTIVE_BROWSERS.size,
+      queueLength:
+        cfg.targets.filter((target) => target.schedulerQueued).length + controls.pendingCount(),
     },
     config: {
       maxConcurrent: cfg.maxConcurrent,
@@ -2925,6 +3138,21 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
       passwordChangeAvailable: admin.passwordChangeAvailable,
       via: authentication.via,
     });
+    return;
+  }
+
+  if (pathname === '/metrics') {
+    if (req.method !== 'GET') {
+      sendText(res, 405, 'method not allowed');
+      return;
+    }
+    if (!requireReadAuth()) return;
+    sendText(
+      res,
+      200,
+      buildMetrics(cfg, status, controls),
+      'text/plain; version=0.0.4; charset=utf-8',
+    );
     return;
   }
 
@@ -3353,7 +3581,7 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
         !stopping &&
         !isAuthenticationFailureReason(lastResult?.reason)
       ) {
-        await sleep(cfg.retryDelayMs ?? 60_000);
+        await waitForStop(cfg.retryDelayMs ?? 60_000);
       }
     }
   } finally {
@@ -3388,12 +3616,14 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
       });
     }
   }
+  runtimeStateStore?.schedule();
   return finalResult;
 }
 
 function scheduleNext(target) {
   const jitter = target.jitterMs > 0 ? Math.floor(Math.random() * target.jitterMs) : 0;
   target.nextDue = Date.now() + target.intervalMs + jitter;
+  runtimeStateStore?.schedule();
 }
 
 /**
@@ -3438,6 +3668,7 @@ async function runTargets(cfg, targets, log, cycle, status) {
             nextVisitInMin: Math.round(target.intervalMs / MINUTE),
           });
         }
+        runtimeStateStore?.schedule();
       }
     }
   };
@@ -3459,6 +3690,7 @@ async function main() {
   let admin;
   let release = null;
   let failureDumpCleanupTimer = null;
+  let shutdownForceTimer = null;
   try {
     cfg = loadConfig();
     admin = createAdminAuth(cfg);
@@ -3479,6 +3711,19 @@ async function main() {
   await rotateLog(cfg.logFile);
 
   const log = createLogger(cfg);
+  runtimeStateStore = createRuntimeStateStore(cfg, log);
+  try {
+    await runtimeStateStore.load();
+  } catch (error) {
+    await log({
+      level: 'error',
+      event: 'runtime-state-load-failed',
+      error: error.message,
+    }).catch(() => {});
+    await release?.().catch(() => {});
+    process.exitCode = 2;
+    return;
+  }
   const status = createStatus(cfg);
   const controls = createRunController(cfg);
   const targetManager = createTargetManager(cfg, status, controls);
@@ -3507,8 +3752,18 @@ async function main() {
 
   const health = startHealthServer(cfg, status, log, controls, admin, targetManager);
   const stop = (signal) => {
-    stopping = true;
-    log({ level: 'info', event: 'shutdown', signal }).catch(() => {});
+    const firstSignal = !stopping;
+    requestStop();
+    if (!firstSignal) return;
+    void log({ level: 'info', event: 'shutdown', signal }).catch(() => {});
+    shutdownForceTimer = setTimeout(() => {
+      void log({
+        level: 'warn',
+        event: 'shutdown-timeout',
+        graceMs: SHUTDOWN_GRACE_MS,
+      }).catch(() => {});
+      process.exit(1);
+    }, SHUTDOWN_GRACE_MS);
   };
   process.on('SIGINT', () => stop('SIGINT'));
   process.on('SIGTERM', () => stop('SIGTERM'));
@@ -3552,8 +3807,11 @@ async function main() {
     if (cfg.targets.length > 0) {
       const minInterval = Math.min(...cfg.targets.map((t) => t.intervalMs));
       cfg.targets.forEach((target, index) => {
-        target.nextDue = Date.now() + Math.floor((index * minInterval) / cfg.targets.length);
+        if (!target.paused && !Number.isFinite(target.nextDue)) {
+          target.nextDue = Date.now() + Math.floor((index * minInterval) / cfg.targets.length);
+        }
       });
+      runtimeStateStore?.schedule();
     }
 
     let cycle = 0;
@@ -3584,18 +3842,28 @@ async function main() {
           )
           .map((target) => target.nextDue),
       );
-      await sleep(
+      await waitForStop(
         Number.isFinite(nextDue)
           ? Math.max(1000, Math.min(5000, nextDue - Date.now()))
           : 1000,
       );
     }
   } finally {
+    try {
+      await runtimeStateStore?.flushNow();
+    } catch (error) {
+      await log({
+        level: 'warn',
+        event: 'runtime-state-flush-failed',
+        error: error.message,
+      }).catch(() => {});
+    }
     if (failureDumpCleanupTimer) clearInterval(failureDumpCleanupTimer);
-    admin.sessions.clear();
     if (health) {
       await new Promise((resolve) => health.close(resolve));
     }
+    if (shutdownForceTimer) clearTimeout(shutdownForceTimer);
+    admin.sessions.clear();
     await release();
   }
 }

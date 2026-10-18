@@ -133,6 +133,21 @@
               <strong id="metric-visits">--</strong>
               <small>自进程启动以来</small>
             </article>
+            <article class="metric-card">
+              <span class="metric-label">内存占用</span>
+              <strong id="metric-memory">--</strong>
+              <small>Node.js 进程 RSS</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">活跃浏览器</span>
+              <strong id="metric-browsers">--</strong>
+              <small>当前正在运行</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">排队任务</span>
+              <strong id="metric-queue">--</strong>
+              <small>等待调度的目标</small>
+            </article>
           </section>
 
           <section class="panel targets-panel" aria-labelledby="targets-title">
@@ -232,13 +247,13 @@
           </div>
           <div class="field">
             <label for="target-interval">巡检间隔（分钟） <span aria-hidden="true">*</span></label>
-            <input id="target-interval" name="intervalMin" type="number" min="1" max="29" step="1" value="20" required>
-            <small>必须小于 30 分钟，默认 20 分钟。</small>
+            <input id="target-interval" name="intervalMin" type="number" min="1" max="28" step="1" value="20" required>
+            <small>巡检间隔与随机抖动之和必须不超过 28 分钟。</small>
           </div>
           <div class="field">
             <label for="target-jitter">随机抖动（分钟） <span aria-hidden="true">*</span></label>
             <input id="target-jitter" name="jitterMin" type="number" min="0" max="10" step="1" value="2" required>
-            <small>在间隔上增加 0–10 分钟随机延迟。</small>
+            <small>在间隔上增加 0–10 分钟随机延迟，且总和不超过 28 分钟。</small>
           </div>
           <div class="field field-wide">
             <label for="target-expect">期望文本</label>

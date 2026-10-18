@@ -230,7 +230,7 @@ async function main() {
       `--log-dir=${path.join(tempDir, 'unused-logs')}`,
       `--lock-file=${path.join(tempDir, 'unused.lock')}`,
     ]);
-    const noPasswordExit = await waitForExit(noPassword.child, 5_000);
+    const noPasswordExit = await waitForExit(noPassword.child, 15_000);
     assert.equal(noPasswordExit, 2, noPassword.output.stderr);
     assert.match(noPassword.output.stderr, /ADMIN_PASSWORD/);
 

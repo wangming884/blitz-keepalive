@@ -11,7 +11,7 @@
     "start": "node keepalive.mjs",
     "visit": "node keepalive.mjs --once",
     "fake": "node test/fake-blitz.mjs",
-    "test": "node test/admin-smoke.mjs"
+    "test": "node test/admin-smoke.mjs && node test/hardening.mjs"
   },
   "dependencies": {
     "puppeteer-core": "^25.14.0"

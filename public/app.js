@@ -52,6 +52,9 @@ const elements = {
   metricFailing: document.getElementById('metric-failing'),
   metricPaused: document.getElementById('metric-paused'),
   metricVisits: document.getElementById('metric-visits'),
+  metricMemory: document.getElementById('metric-memory'),
+  metricBrowsers: document.getElementById('metric-browsers'),
+  metricQueue: document.getElementById('metric-queue'),
   targetSearch: document.getElementById('target-search'),
   targetFilters: document.getElementById('target-filters'),
   targetFilterSummary: document.getElementById('target-filter-summary'),
@@ -285,6 +288,7 @@ async function loadOverview({ silent = false } = {}) {
 
 function render(data) {
   const status = data.status || {};
+  const runtime = data.runtime || {};
   const targets = Array.isArray(data.targets) ? data.targets : [];
   const logs = Array.isArray(data.logs) ? data.logs : [];
   const healthy = targets.filter((target) => target.lastVisit?.ok === true).length;
@@ -301,6 +305,9 @@ function render(data) {
   setText(elements.metricFailing, String(failing));
   setText(elements.metricPaused, String(paused));
   setText(elements.metricVisits, String(status.visits ?? 0));
+  setText(elements.metricMemory, formatBytes(runtime.memoryUsage?.rss));
+  setText(elements.metricBrowsers, String(runtime.activeBrowsers ?? 0));
+  setText(elements.metricQueue, String(runtime.queueLength ?? 0));
   setText(elements.lastSweep, status.lastSweepAt ? formatDateTime(status.lastSweepAt) : '等待首轮');
   setText(elements.uptime, formatUptime(status.uptimeSec));
   setText(elements.lastUpdated, formatDateTime(data.generatedAt));
@@ -464,8 +471,11 @@ function createTargetCard(target) {
 
   const facts = document.createElement('dl');
   facts.className = 'target-facts';
-  appendFact(facts, '巡检周期', `${target.intervalMin ?? '--'} 分钟`);
-  appendFact(facts, '随机抖动', `${target.jitterMin ?? '--'} 分钟`);
+  appendFact(
+    facts,
+    '访问窗口',
+    `${target.intervalMin ?? '--'} 分钟 + 最多 ${target.jitterMin ?? '--'} 分钟`,
+  );
   const nextDue = appendFact(facts, '下次执行', formatNext(target.nextDue));
   if (target.nextDue) nextDue.dataset.nextDue = target.nextDue;
   appendFact(facts, '最近成功', target.lastSuccessfulVisitAt ? formatDateTime(target.lastSuccessfulVisitAt) : '尚无成功记录');
@@ -654,6 +664,20 @@ function formatUptime(value) {
   return `${minutes} 分 ${Math.floor(seconds % 60)} 秒`;
 }
 
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '--';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let amount = bytes / 1024;
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  return `${amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unitIndex]}`;
+}
+
 function formatNext(value) {
   if (!value) return '待调度';
   const due = new Date(value).getTime();
@@ -809,11 +833,14 @@ function validateTargetPayload(payload) {
   }
   if (!['http:', 'https:'].includes(parsedUrl.protocol)) return '网页地址仅支持 http:// 或 https://。';
   if (parsedUrl.username || parsedUrl.password) return '网页地址不能包含账号或密码。';
-  if (!Number.isInteger(payload.intervalMin) || payload.intervalMin < 1 || payload.intervalMin > 29) {
-    return '巡检间隔必须是 1–29 的整数。';
+  if (!Number.isInteger(payload.intervalMin) || payload.intervalMin < 1 || payload.intervalMin > 28) {
+    return '巡检间隔必须是 1–28 的整数。';
   }
   if (!Number.isInteger(payload.jitterMin) || payload.jitterMin < 0 || payload.jitterMin > 10) {
     return '随机抖动必须是 0–10 的整数。';
+  }
+  if (payload.intervalMin + payload.jitterMin > 28) {
+    return '巡检间隔与随机抖动之和不能超过 28 分钟，否则可能错过 30 分钟休眠窗口。';
   }
   if (payload.id && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(payload.id)) {
     return '目标名称只能包含字母、数字、点、下划线和短横线，长度 1–64。';

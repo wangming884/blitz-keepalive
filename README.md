@@ -114,12 +114,14 @@ targets.json
 | `account` | 仅用于日志分组，可省略 |
 | `url` | 应用地址（http/https） |
 | `expect` | **建议填写**应用页面独有文字，最可靠的「已唤醒」判据 |
-| `intervalMin` | 该目标的访问间隔，1–29 分钟 |
+| `intervalMin` | 该目标的访问间隔，1–28 分钟，且必须满足 `intervalMin + jitterMin <= 28` |
 | `jitterMin` | 该目标的随机延迟上限，0–10 分钟 |
 | `timeoutSec` / `wakeWaitSec` / `settleSec` / `retries` | 覆盖默认超时、唤醒等待、停留、重试 |
 | `maxConcurrent` | 同时访问几个目标（1–5，默认 2） |
 
 优先级：**目标级 > 命令行/环境变量 > defaults**。例如给 n8n 单独设 15 分钟，其余仍用 20 分钟。
+
+`intervalMin + jitterMin` 必须不超过 28 分钟。这样即使取到最大抖动，下一次访问仍会发生在 blitz.cloud 的 30 分钟休眠阈值之前；配置为 29 分钟，或 20 分钟间隔加 10 分钟抖动，都会在启动时被拒绝。
 
 ### 3.3 目标后台访问密码
 
@@ -136,13 +138,16 @@ targets.json
 
 > 多目标模式下请把 `.env` 里的 `INTERVAL_MIN` / `JITTER_MIN` **留空**（安装脚本会自动清空），否则这个全局值会覆盖 JSON 里的 `defaults`。需要全局统一调整时再显式填写或传 `--interval-min`。
 
-规模与资源参考（每个浏览器实例峰值约 150–250 MB，单次访问约 6 秒）：
+规模与资源参考（实测 Node.js 峰值约 70 MB，单个 Chromium 峰值私有内存约 144 MB，单次访问约 6 秒；下表为估算）：
 
 | 目标数 | maxConcurrent | 峰值内存 | 一轮扫描耗时 |
 | --- | --- | --- | --- |
-| 1–5 | 2 | 约 400–600 MB | < 1 分钟 |
+| 1 | 1 | 约 200–250 MB | < 1 分钟 |
+| 1–5 | 2 | 约 400–500 MB | < 1 分钟 |
 | 6–20 | 2–3 | 约 600 MB–1 GB | 1–3 分钟 |
-| 20–50 | 3 | 约 1 GB | 3–5 分钟 |
+| 20–50 | 3 | 至少约 1 GB | 3–5 分钟 |
+
+容器建议预留 768 MB–1 GB；复杂页面、登录流程、更多并发或 gVisor 环境应直接按 1 GB 以上规划。实际占用受页面复杂度、Chromium 版本、并发数和失败重试影响。
 
 只要一轮扫描远小于 20 分钟，就不会有目标因调度延迟而休眠。
 
@@ -234,7 +239,8 @@ blitz-keepalive/
 │   ├── windows/uninstall-task.ps1
 │   ├── linux/blitz-keepalive.service
 │   ├── backup.ps1                # Windows 数据备份脚本
-│   └── backup.sh                 # Linux/macOS 数据备份脚本
+│   ├── backup.sh                 # Linux/macOS 数据备份脚本
+│   └── backup-crypto.mjs         # AES-256-GCM 备份加解密工具
 ├── public/                       # 管理网页：原生 HTML / CSS / JavaScript
 │   ├── index.html
 │   ├── styles.css
@@ -243,6 +249,7 @@ blitz-keepalive/
 ├── test/fake-proxy.mjs           # 本地 HTTP / SOCKS5 代理，用于验证代理链路
 ├── test/targets-proxy.json       # 代理优先级测试配置
 ├── test/admin-smoke.mjs          # 登录、目标 CRUD、自动巡检与持久化回归
+├── test/hardening.mjs            # 指标、锁、运行态、备份与严格子资源回归
 ├── .github/workflows/ci.yml      # Node 22/24 语法、测试与依赖审计
 ├── data/                         # 网页目标、管理密码与目标密码加密密钥（运行时生成）
 └── logs/                         # 运行日志与失败现场（运行时生成）
@@ -498,11 +505,11 @@ http://127.0.0.1:8080/admin
 
 管理网页支持：
 
-- 查看进程总体状态、目标总数、暂停数、最近成功数、连续失败数、认证失败数、累计访问和运行时间。
+- 查看进程总体状态、目标总数、暂停数、最近成功数、连续失败数、认证失败数、累计访问、运行时间、Node.js RSS 内存、活跃浏览器和排队任务。
 - 按 ID、账号或 URL 搜索目标，并按全部、正常、失败、暂停、等待筛选。
 - 查看每个目标的下次执行时间、最近结果、期望文本、登录成功选择器、代理和失败次数。
 - 为网页管理目标设置、替换或清除后台访问密码；页面只显示“已配置/未配置”，不会回显密码。
-- 暂停或恢复单个目标。手动暂停是运行时状态，重启后恢复调度；连续 3 次认证失败会自动暂停 30 分钟。
+- 暂停或恢复单个目标。暂停原因、截止时间和下一次执行时间会写入 `runtime-state.json`，重启后继续保持；连续 3 次认证失败会自动暂停 30 分钟。
 - 导入、导出网页管理目标。导入为完整替换，最多 100 个目标、请求体最大 128 KB；拒绝密码等敏感字段，同 ID 导入会保留原密码密文。
 - 查看最近 40 条进程事件和访问结果。
 - 对全部目标或单个目标触发一次立即巡检；请求会进入内存队列，不会修改配置文件。
@@ -515,7 +522,7 @@ http://127.0.0.1:8080/admin
 3. 登录后可在“安全设置”中验证当前密码并设置新密码；新密码至少 10 个字符，成功后其他旧会话全部失效。
 4. 连续 5 次密码错误会锁定该客户端 5 分钟；退出登录会立即销毁当前服务端会话。
 
-`ADMIN_PASSWORD` 或持久化密码文件是管理网页的唯一登录方式。`STATUS_TOKEN` 是只读 API 令牌，只能通过 `X-Status-Token` 或 `Authorization: Bearer` 请求头读取 `/status`、`/api/overview`、`/api/logs`、`/api/targets/export` 等只读接口；它不能登录 `/admin`、不能修改密码、不能执行暂停/恢复/导入等写操作。查询参数 `?token=...` 已移除。
+`ADMIN_PASSWORD` 或持久化密码文件是管理网页的唯一登录方式。`STATUS_TOKEN` 是只读 API 令牌，只能通过 `X-Status-Token` 或 `Authorization: Bearer` 请求头读取 `/status`、`/metrics`、`/api/overview`、`/api/logs`、`/api/targets/export` 等只读接口；它不能登录 `/admin`、不能修改密码、不能执行暂停/恢复/导入等写操作。查询参数 `?token=...` 已移除。
 
 监听 `PORT` 时如果没有配置 `ADMIN_PASSWORD` 或已存在的 `ADMIN_PASSWORD_FILE`，进程会拒绝启动；只有 `STATUS_TOKEN` 不足以启动管理台。建议生产环境设置 `REQUIRE_HTTPS=true` 并由可信反向代理终止 TLS。`/healthz` 始终允许明文探针；只有直连地址位于 `TRUST_PROXY_CIDRS` 且 `TRUST_PROXY=true` 时，服务才会信任 `X-Forwarded-Proto` 和 `X-Forwarded-For`。
 
@@ -529,6 +536,7 @@ PUT    /api/password                # 修改管理密码并轮换当前会话
 GET    /api/overview                # 总览、目标、最近日志
 GET    /api/logs?limit=50           # 最近日志（1..200）
 GET    /status                      # 只读状态（需会话或 STATUS_TOKEN）
+GET    /metrics                     # Prometheus 文本指标（需会话或 STATUS_TOKEN）
 GET    /api/targets/export          # 导出网页管理目标（不含密码材料）
 POST   /api/run                     # 排队巡检全部目标
 POST   /api/run?target=<id>         # 排队巡检单个目标
@@ -544,27 +552,54 @@ POST   /api/targets/import          # 完整替换网页管理目标
 
 浏览器使用登录 Cookie 调用写接口；脚本可使用 `X-Status-Token: <token>` 或 `Authorization: Bearer <token>` 读取只读接口。令牌不会写入 URL，也不会被管理网页读取。
 
+`/metrics` 使用 Prometheus 文本格式，包含进程存活、目标数、累计访问/失败、活跃浏览器、排队任务、Node.js RSS 和运行时间。未携带会话或 `STATUS_TOKEN` 时返回 `401`；采集器示例：
+
+```text
+Authorization: Bearer <STATUS_TOKEN>
+```
+
 ### 10.2 备份、恢复与发布检查
 
-网页目标、管理密码哈希和目标密码加密密钥必须一起备份。仓库提供两个不输出密码或密钥内容的脚本：
+网页目标、管理密码哈希、目标密码加密密钥和运行态必须一起备份。仓库提供两个不输出密码或密钥内容的脚本；归档默认使用 AES-256-GCM 加密，成功后删除明文归档：
 
 ```powershell
+$env:BACKUP_PASSPHRASE = '至少 12 个字符的独立备份口令'
 pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups
 ```
 
 ```bash
-./deploy/backup.sh --data-dir ./data --output-dir ./backups
+BACKUP_PASSPHRASE='至少 12 个字符的独立备份口令' ./deploy/backup.sh --data-dir ./data --output-dir ./backups
 ```
+
+生产环境优先使用口令文件，避免口令进入 shell 历史或进程环境：
+
+```powershell
+pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups -PassphraseFile .\backup-passphrase.txt
+```
+
+```bash
+./deploy/backup.sh --data-dir ./data --output-dir ./backups --passphrase-file ./backup-passphrase.txt
+```
+
+仅在另一个可信加密层会立即接管文件时，才使用 `-AllowPlaintext` / `--allow-plaintext` 保留明文归档。
 
 备份包含：
 
 - `managed-targets.json`：网页目标及加密后的目标密码。
 - `target-secrets.key`：目标密码解密密钥，丢失后已保存密码无法恢复。
 - `admin-auth.json`：管理密码的 scrypt 哈希。
+- `runtime-state.json`：暂停状态、最近结果和下一次执行时间；文件不存在时仅警告。
 
-归档本身仍是敏感文件。Windows 脚本会尝试限制 ACL，Linux 脚本使用 `umask 077`、目录 `0700` 和归档 `0600`；长期保存前建议再用 KMS、age 或 GPG 加密，并放到独立介质。
+加密后的归档仍应视为敏感文件。Windows 脚本会尝试限制 `.enc`（以及显式保留的 ZIP）的 ACL，Linux 脚本使用 `umask 077`、目录 `0700` 和文件 `0600`。备份口令必须与归档分开保存；口令丢失后无法恢复。
 
-恢复步骤：停止服务，将三个文件恢复到同一数据目录并保持权限 `0600`，再启动服务。不要把旧密钥与另一批目标文件混用。升级前先运行 `npm test`；CI 会对 Node 22/24 执行语法检查、冒烟测试和高危依赖审计。
+恢复步骤：停止服务，解密归档并解压，将四个文件恢复到同一数据目录并保持权限 `0600`，再启动服务：
+
+```powershell
+node deploy\backup-crypto.mjs decrypt .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip.enc
+Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip -DestinationPath .\data -Force
+```
+
+不要把旧密钥与另一批目标文件混用。升级前先运行 `npm test`；CI 会对 Node 22/24 执行语法检查、完整冒烟测试、加固回归和高危依赖审计。
 
 ## 11. 风险与注意事项
 
@@ -579,7 +614,7 @@ pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups
 9. **Docker 相互保活的死锁**：两个应用同时休眠时没有容器在运行，谁也唤醒不了谁；必须有外部看门狗或人工介入。后台应用拓扑没有这个问题。
 10. **gVisor 沙箱**：blitz 的每个应用跑在 gVisor 中，Chromium 可能更慢、更容易触发内存限制；本机 Docker 测试结果不能等同于 blitz 上的表现。
 11. **代理凭据**：优先用 `PROXY_PASSWORD` 等环境变量，`--proxy-pass` 会出现在进程列表；SOCKS 认证不被 Chromium 支持；Chrome 仍会经代理发出少量后台请求（组件更新、GCM），代理侧会看到这些域名。
-12. **暂停与运行态**：手动暂停只保存在内存中，进程重启后会恢复调度；需要长期停用时请删除目标或移出配置文件。自动认证失败暂停也会在重启后清除。
+12. **暂停与运行态**：手动暂停和自动认证失败暂停会写入 `runtime-state.json`，重启后继续保持；需要长期停用时仍建议删除目标或移出配置文件，并定期备份运行态文件。
 13. **HTTPS 代理信任**：`REQUIRE_HTTPS=true` 时 `/healthz` 是唯一明文健康探针；只有配置了可信代理 CIDR，服务才接受 `X-Forwarded-Proto: https`，否则反向代理后的请求也会被 426 拒绝。
 
 ## 12. 参数速查
@@ -590,7 +625,7 @@ pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups
 --config=<file>     多目标 JSON（与 --url 二选一）
 --url=              单目标地址
 --expect=           页面独有文字（推荐）
---interval-min=20   访问间隔（1..29）
+--interval-min=20   访问间隔（1..28，且与 jitter 之和不超过 28）
 --jitter-min=2      随机抖动上限（0..10）
 --max-concurrent=2  并发访问数（1..5）
 --once              立即访问所有目标一次
@@ -601,6 +636,7 @@ pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups
 --admin-password=... 管理网页登录密码（设置 PORT 时必需）
 --admin-password-file=data/admin-auth.json  持久化 scrypt 密码文件（优先于 --admin-password）
 --managed-targets-file=data/managed-targets.json  网页目标持久化文件
+--runtime-state-file=data/runtime-state.json  暂停、最近结果和下次执行时间持久化文件
 --target-secret-key=...  目标密码加密密钥（32 字节 base64 或 64 位 hex；优先用环境变量）
 --target-secret-key-file=data/target-secrets.key  自动生成/读取的目标密码加密密钥文件
 --status-token=...  只读 API 令牌（不能登录管理台或执行写操作）
@@ -610,6 +646,7 @@ pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups
 --session-idle-timeout-min=60  管理会话空闲超时（5..720 分钟）
 --target-url-allowlist=*.blitz.cloud  目标域名允许列表
 --target-url-allow-private=false  是否允许私网/本机目标（默认禁止）
+--target-url-strict-subresources=false  是否对所有子资源执行域名允许列表（更严格，可能影响 CDN）
 --chrome-no-sandbox=false  仅在已有容器安全边界时启用
 --failure-dump-max-files=100  失败现场最大保留数量
 --failure-dump-max-age-days=7  失败现场最大保留天数
@@ -628,7 +665,9 @@ pwsh -NoProfile -File .\deploy\backup.ps1 -DataDir .\data -OutputDir .\backups
 --dump-failures=false  关闭失败现场落盘
 ```
 
-环境变量：`BLITZ_URL`、`CONFIG_FILE`、`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。
+环境变量：`BLITZ_URL`、`CONFIG_FILE`、`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。
+
+备份脚本另外读取 `BACKUP_PASSPHRASE` 或 `BACKUP_PASSPHRASE_FILE`；这两个变量不会被保活进程使用。
 
 使用 `.env`：
 

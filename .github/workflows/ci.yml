@@ -36,6 +36,8 @@ jobs:
           node --check public/app.js
           node --check test/fake-blitz.mjs
           node --check test/admin-smoke.mjs
+          node --check test/hardening.mjs
+          node --check deploy/backup-crypto.mjs
 
       - name: Smoke tests
         run: npm test

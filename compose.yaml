@@ -6,6 +6,12 @@
 services:
   peer-a:
     build: .
+    init: true
+    mem_limit: 1g
+    pids_limit: 512
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
     environment:
       BLITZ_URL: https://app-b.bob.blitz.cloud
       EXPECT_TEXT: ""
@@ -16,15 +22,24 @@ services:
       ADMIN_PASSWORD: ${PEER_A_ADMIN_PASSWORD:-}
       ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
       MANAGED_TARGETS_FILE: /app/data/managed-targets.json
+      RUNTIME_STATE_FILE: /app/data/runtime-state.json
       TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
+      TARGET_URL_STRICT_SUBRESOURCES: "false"
     ports:
       - "8081:8080"
     volumes:
       - ./data/peer-a:/app/data
+      - ./logs/peer-a:/app/logs
     restart: unless-stopped
 
   peer-b:
     build: .
+    init: true
+    mem_limit: 1g
+    pids_limit: 512
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
     environment:
       BLITZ_URL: https://app-a.alice.blitz.cloud
       EXPECT_TEXT: ""
@@ -35,9 +50,12 @@ services:
       ADMIN_PASSWORD: ${PEER_B_ADMIN_PASSWORD:-}
       ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
       MANAGED_TARGETS_FILE: /app/data/managed-targets.json
+      RUNTIME_STATE_FILE: /app/data/runtime-state.json
       TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
+      TARGET_URL_STRICT_SUBRESOURCES: "false"
     ports:
       - "8082:8080"
     volumes:
       - ./data/peer-b:/app/data
+      - ./logs/peer-b:/app/logs
     restart: unless-stopped
