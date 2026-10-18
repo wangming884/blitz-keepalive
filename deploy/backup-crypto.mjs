@@ -90,8 +90,9 @@ function parseArgs(argv) {
 }
 
 async function resolvePassphrase({ passphraseFile } = {}) {
-  const envValue = process.env.BACKUP_PASSPHRASE;
-  const envFile = process.env.BACKUP_PASSPHRASE_FILE;
+  // Backup settings are optional for the application and validated only when this command runs.
+  const envValue = process.env.BACKUP_PASSPHRASE ?? '';
+  const envFile = process.env.BACKUP_PASSPHRASE_FILE ?? '';
   if (passphraseFile && envValue) {
     throw new Error('Use either BACKUP_PASSPHRASE or a passphrase file, not both.');
   }
