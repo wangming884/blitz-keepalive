@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 #
 # blitz.cloud keep-alive agent as a deployable container.
 #
