@@ -391,6 +391,8 @@ docker buildx build --platform linux/amd64 \
 
 本仓库的 Dockerfile 使用官方 Playwright 镜像并固定镜像 digest，构建阶段不访问 Alpine `apk` 软件源，因此更适合 blitz 云端构建器。容器默认设置 `CHROME_NO_SANDBOX=true` 以兼容 Docker/gVisor 的沙箱限制；进程仍以非 root 用户 `pwuser` 运行，部署时应保留 `no-new-privileges` 等容器隔离措施。
 
+镜像默认提供 `TRUST_PROXY_CIDRS=127.0.0.1/32,::1/128`，用于兼容 blitz 启用 `TRUST_PROXY=true` 的启动校验。若实际反向代理不是从回环地址连接，请通过 blitz 环境变量覆盖为代理的真实 CIDR；不要把不受控的公网网段加入信任列表。
+
 ### 8.3 部署到两个账号
 
 账号 A 的应用（例如 `keeper-a`）：

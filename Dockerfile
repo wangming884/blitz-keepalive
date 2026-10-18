@@ -18,6 +18,7 @@ ENV NODE_ENV=production \
     CHROME_NO_SANDBOX=true \
     PORT=8080 \
     BIND_HOST=0.0.0.0 \
+    TRUST_PROXY_CIDRS=127.0.0.1/32,::1/128 \
     HOME=/tmp \
     LOG_DIR=/app/logs
 
