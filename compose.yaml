@@ -1,10 +1,13 @@
-# Two management consoles for local smoke testing.
+# Single management console for local deployment and smoke testing.
 #
-# Targets are intentionally not configured here. Open /admin on each service
-# and add the URL that should be kept awake. For a real deployment, configure
-# the required secrets and persistent paths in the Blitz dashboard.
+# Start with: docker compose up -d
+# Open:       http://localhost:8080/admin
+#
+# Targets are intentionally not configured here. Open /admin and add the URL
+# that should be kept awake. For a real deployment, configure the required
+# secrets and persistent paths in the Blitz dashboard.
 services:
-  peer-a:
+  keepalive:
     build: .
     init: true
     mem_limit: 1g
@@ -17,41 +20,15 @@ services:
       JITTER_MIN: 2
       PORT: 8080
       BIND_HOST: 0.0.0.0
-      ADMIN_PASSWORD: ${PEER_A_ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
       MANAGED_TARGETS_FILE: /app/data/managed-targets.json
       RUNTIME_STATE_FILE: /app/data/runtime-state.json
       TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
       TARGET_URL_STRICT_SUBRESOURCES: "false"
     ports:
-      - "8081:8080"
+      - "8080:8080"
     volumes:
-      - ./data/peer-a:/app/data
-      - ./logs/peer-a:/app/logs
-    restart: unless-stopped
-
-  peer-b:
-    build: .
-    init: true
-    mem_limit: 1g
-    pids_limit: 512
-    stop_grace_period: 15s
-    security_opt:
-      - no-new-privileges:true
-    environment:
-      INTERVAL_MIN: 20
-      JITTER_MIN: 2
-      PORT: 8080
-      BIND_HOST: 0.0.0.0
-      ADMIN_PASSWORD: ${PEER_B_ADMIN_PASSWORD:-}
-      ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
-      MANAGED_TARGETS_FILE: /app/data/managed-targets.json
-      RUNTIME_STATE_FILE: /app/data/runtime-state.json
-      TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
-      TARGET_URL_STRICT_SUBRESOURCES: "false"
-    ports:
-      - "8082:8080"
-    volumes:
-      - ./data/peer-b:/app/data
-      - ./logs/peer-b:/app/logs
+      - ./data:/app/data
+      - ./logs:/app/logs
     restart: unless-stopped
