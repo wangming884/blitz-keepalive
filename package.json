@@ -1,0 +1,19 @@
+{
+  "name": "blitz-keepalive",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Keeps a blitz.cloud free-plan app awake by visiting it with a real browser, optionally through HTTP/SOCKS proxies.",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "start": "node keepalive.mjs",
+    "visit": "node keepalive.mjs --once",
+    "fake": "node test/fake-blitz.mjs",
+    "test": "node test/admin-smoke.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.14.0"
+  }
+}

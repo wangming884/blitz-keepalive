@@ -1,0 +1,10 @@
+node_modules/
+logs/
+data/
+logs-test/
+keepalive.lock
+test.lock
+.env
+proxy-*.log
+err.txt
+test-cert.pfx

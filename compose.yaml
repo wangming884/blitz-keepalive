@@ -1,0 +1,43 @@
+# Two containers visiting each other's blitz.cloud app.
+#
+# Local smoke test only: the same image is what you push to Docker Hub and
+# deploy twice on blitz.cloud. For a real deployment set the environment
+# variables in the blitz dashboard instead of this file.
+services:
+  peer-a:
+    build: .
+    environment:
+      BLITZ_URL: https://app-b.bob.blitz.cloud
+      EXPECT_TEXT: ""
+      INTERVAL_MIN: 20
+      JITTER_MIN: 2
+      PORT: 8080
+      BIND_HOST: 0.0.0.0
+      ADMIN_PASSWORD: ${PEER_A_ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
+      MANAGED_TARGETS_FILE: /app/data/managed-targets.json
+      TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./data/peer-a:/app/data
+    restart: unless-stopped
+
+  peer-b:
+    build: .
+    environment:
+      BLITZ_URL: https://app-a.alice.blitz.cloud
+      EXPECT_TEXT: ""
+      INTERVAL_MIN: 20
+      JITTER_MIN: 2
+      PORT: 8080
+      BIND_HOST: 0.0.0.0
+      ADMIN_PASSWORD: ${PEER_B_ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
+      MANAGED_TARGETS_FILE: /app/data/managed-targets.json
+      TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./data/peer-b:/app/data
+    restart: unless-stopped

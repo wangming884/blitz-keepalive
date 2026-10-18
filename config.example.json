@@ -1,0 +1,36 @@
+{
+  "defaults": {
+    "intervalMin": 20,
+    "jitterMin": 3,
+    "expect": "",
+    "timeoutSec": 60,
+    "wakeWaitSec": 45,
+    "settleSec": 6,
+    "retries": 2,
+    "retryDelaySec": 60,
+    "proxy": "",
+    "proxyBypass": ""
+  },
+  "maxConcurrent": 2,
+  "targets": [
+    {
+      "id": "alice-blog",
+      "account": "alice",
+      "url": "https://blog.alice.blitz.cloud",
+      "expect": "Alice"
+    },
+    {
+      "id": "alice-n8n",
+      "account": "alice",
+      "url": "https://n8n.alice.blitz.cloud",
+      "expect": "n8n",
+      "intervalMin": 15
+    },
+    {
+      "id": "bob-uptime",
+      "account": "bob",
+      "url": "https://uptime.bob.blitz.cloud",
+      "expect": "Uptime Kuma"
+    }
+  ]
+}

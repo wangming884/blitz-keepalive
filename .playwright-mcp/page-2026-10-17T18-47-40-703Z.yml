@@ -1,0 +1,99 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - link "Blitz Keepalive 管理控制台" [ref=e4] [cursor=pointer]:
+        - /url: /admin
+        - generic [ref=e9]:
+          - strong [ref=e10]: Blitz Keepalive
+          - generic [ref=e11]: 保活与可用性控制台
+      - generic [ref=e12]:
+        - generic [ref=e13]: 已连接
+        - button "安全设置" [ref=e44] [cursor=pointer]
+        - button "添加目标" [ref=e45] [cursor=pointer]
+        - button "刷新" [ref=e46] [cursor=pointer]
+        - button "立即巡检" [ref=e47] [cursor=pointer]
+        - button "退出登录" [ref=e48] [cursor=pointer]
+    - main [ref=e16]:
+      - generic [ref=e49]:
+        - generic [ref=e50]:
+          - generic [ref=e52]:
+            - paragraph [ref=e53]: 当前状态
+            - heading "等待添加目标" [level=1] [ref=e54]
+            - paragraph [ref=e55]: 添加一个网页目标后，调度器会自动开始定时访问并验证页面内容。
+          - generic [ref=e56]:
+            - generic [ref=e57]:
+              - term [ref=e58]: 上次巡检
+              - definition [ref=e59]: 等待首轮
+            - generic [ref=e60]:
+              - term [ref=e61]: 进程运行时间
+              - definition [ref=e62]: 0 分 42 秒
+            - generic [ref=e63]:
+              - term [ref=e64]: 数据更新时间
+              - definition [ref=e65]: 10/18 02:47:39
+        - region "运行指标" [ref=e66]:
+          - article [ref=e67]:
+            - generic [ref=e68]: 目标总数
+            - strong [ref=e69]: "0"
+            - generic [ref=e70]: 已纳入调度的应用
+          - article [ref=e71]:
+            - generic [ref=e72]: 最近正常
+            - strong [ref=e73]: 0 / 0
+            - generic [ref=e74]: 最近一次巡检成功
+          - article [ref=e75]:
+            - generic [ref=e76]: 连续失败
+            - strong [ref=e77]: "0"
+            - generic [ref=e78]: 需要优先关注
+          - article [ref=e79]:
+            - generic [ref=e80]: 已暂停
+            - strong [ref=e81]: "0"
+            - generic [ref=e82]: 暂不参与自动调度
+          - article [ref=e83]:
+            - generic [ref=e84]: 累计访问
+            - strong [ref=e85]: "0"
+            - generic [ref=e86]: 自进程启动以来
+        - region [ref=e87]:
+          - generic [ref=e88]:
+            - generic [ref=e89]:
+              - paragraph [ref=e90]: 目标
+              - heading "保活目标" [level=2] [ref=e91]
+            - generic [ref=e92]:
+              - generic [ref=e93]: 每 10 秒自动刷新
+              - button "添加目标" [ref=e94] [cursor=pointer]
+          - generic [ref=e95]:
+            - generic [ref=e96]:
+              - generic [ref=e97]: 搜索保活目标
+              - searchbox "搜索保活目标" [ref=e98]
+            - group "筛选保活目标" [ref=e99]:
+              - button "全部" [pressed] [ref=e100] [cursor=pointer]
+              - button "正常" [ref=e101] [cursor=pointer]
+              - button "失败" [ref=e102] [cursor=pointer]
+              - button "暂停" [ref=e103] [cursor=pointer]
+              - button "等待" [ref=e104] [cursor=pointer]
+            - generic [ref=e105]:
+              - button "导出" [ref=e106] [cursor=pointer]
+              - button "导入" [ref=e107] [cursor=pointer]
+          - paragraph [ref=e108]: 暂无保活目标
+          - generic [ref=e110]:
+            - text: 还没有保活目标。添加网页地址后，调度器会自动开始访问。
+            - button "添加第一个目标" [ref=e111] [cursor=pointer]
+        - region [ref=e112]:
+          - generic [ref=e113]:
+            - generic [ref=e114]:
+              - paragraph [ref=e115]: 活动
+              - heading "最近事件" [level=2] [ref=e116]
+            - generic [ref=e117]: 2 条
+          - generic [ref=e118]:
+            - article [ref=e119]:
+              - generic [ref=e121]:
+                - strong [ref=e123]: 登录成功
+                - paragraph [ref=e124]: 无附加信息
+              - time [ref=e125]: 10/18 02:47:39
+            - article [ref=e126]:
+              - generic [ref=e128]:
+                - strong [ref=e130]: 进程启动
+                - paragraph [ref=e131]: 无附加信息
+              - time [ref=e132]: 10/18 02:46:57
+    - contentinfo [ref=e41]:
+      - generic [ref=e42]: Blitz Keepalive 管理控制台
+      - generic [ref=e43]: 网页目标保存在 data/managed-targets.json
+  - status [ref=e133]: 登录成功。

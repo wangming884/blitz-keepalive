@@ -1,0 +1,25 @@
+{
+  "defaults": {
+    "intervalMin": 20,
+    "jitterMin": 0,
+    "expect": "Demo app is online",
+    "timeoutSec": 20,
+    "wakeWaitSec": 20,
+    "settleSec": 2,
+    "retries": 0
+  },
+  "maxConcurrent": 1,
+  "targets": [
+    {
+      "id": "target-1",
+      "url": "http://127.0.0.1:18888/",
+      "expect": "Demo app is online",
+      "intervalMin": 20,
+      "jitterMin": 0,
+      "timeoutSec": 20,
+      "wakeWaitSec": 20,
+      "settleSec": 2,
+      "retries": 0
+    }
+  ]
+}

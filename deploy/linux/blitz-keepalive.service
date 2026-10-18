@@ -1,0 +1,24 @@
+[Unit]
+Description=blitz.cloud keep-alive (real browser visit)
+Documentation=https://blitz.cloud/docs/limits/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust user and paths to your installation.
+User=blitzkeep
+WorkingDirectory=/opt/blitz-keepalive
+EnvironmentFile=/opt/blitz-keepalive/.env
+ExecStart=/usr/bin/node keepalive.mjs
+# If blitz.cloud rejects headless Chrome, set HEADLESS=false in .env and use:
+# ExecStart=/usr/bin/xvfb-run -a /usr/bin/node keepalive.mjs
+Restart=always
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

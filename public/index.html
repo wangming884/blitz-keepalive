@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Blitz Keepalive · 管理控制台</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="/admin" aria-label="Blitz Keepalive 管理控制台">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="brand-copy">
+            <strong>Blitz Keepalive</strong>
+            <small>保活与可用性控制台</small>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <span class="connection" id="connection" data-state="loading">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label">连接中</span>
+          </span>
+          <button class="button button-quiet" id="security-button" type="button" hidden>
+            安全设置
+          </button>
+          <button class="button button-primary" id="add-target-button" type="button" hidden>
+            添加目标
+          </button>
+          <button class="button button-quiet" id="refresh-button" type="button">
+            刷新
+          </button>
+          <button class="button button-primary" id="run-all-button" type="button">
+            立即巡检
+          </button>
+          <button class="button button-quiet" id="logout-button" type="button" hidden>
+            退出登录
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <section class="auth-panel" id="auth-panel" hidden aria-labelledby="auth-title">
+          <div class="auth-visual">
+            <div class="auth-visual-copy">
+              <p class="auth-kicker">SECURE KEEPALIVE</p>
+              <h2>让每一个目标<br><span>始终在线。</span></h2>
+              <p>浏览器巡检、调度状态与失败现场，集中在一个清晰的控制台里。</p>
+            </div>
+            <div class="auth-signals" aria-hidden="true">
+              <span><i></i>真实浏览器访问</span>
+              <span><i></i>自动错峰调度</span>
+              <span><i></i>会话安全保护</span>
+            </div>
+            <div class="auth-orbit" aria-hidden="true"><i></i><i></i><i></i></div>
+          </div>
+          <div class="auth-card">
+            <div class="auth-card-heading">
+              <p class="eyebrow">访问控制</p>
+              <h2 id="auth-title">登录管理控制台</h2>
+              <p id="auth-message">请输入管理密码后管理保活目标。</p>
+            </div>
+            <form class="auth-form" id="auth-form">
+              <div class="auth-field">
+                <label for="password-input">管理密码</label>
+                <input id="password-input" name="password" type="password" autocomplete="current-password" placeholder="输入管理密码" required>
+              </div>
+              <button class="button button-primary auth-submit" id="login-button" type="submit">登录</button>
+            </form>
+            <p class="auth-footnote">会话 Cookie 仅限当前站点，并在最长 12 小时或空闲超时后自动失效。</p>
+          </div>
+        </section>
+
+        <div class="dashboard-content" id="dashboard-content" hidden>
+          <div class="notice notice-warning" id="security-warning" hidden role="status">
+            <strong id="security-warning-title">未设置访问密码</strong>
+            <span id="security-warning-message">当前管理接口可能对能访问此端口的人开放。</span>
+          </div>
+
+          <div class="notice notice-error" id="error-banner" hidden role="alert">
+            <strong>数据加载失败</strong>
+            <span id="error-message"></span>
+            <button class="text-button" id="retry-button" type="button">重试</button>
+          </div>
+
+          <section class="status-hero" id="status-hero" aria-live="polite">
+            <div class="status-orb" id="status-orb" aria-hidden="true"></div>
+            <div class="status-copy">
+              <p class="eyebrow">当前状态</p>
+              <h1 id="overall-label">正在加载</h1>
+              <p id="overall-detail">正在读取保活进程状态…</p>
+            </div>
+            <dl class="status-meta">
+              <div>
+                <dt>上次巡检</dt>
+                <dd id="last-sweep">--</dd>
+              </div>
+              <div>
+                <dt>进程运行时间</dt>
+                <dd id="uptime">--</dd>
+              </div>
+              <div>
+                <dt>数据更新时间</dt>
+                <dd id="last-updated">--</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="metrics" aria-label="运行指标">
+            <article class="metric-card">
+              <span class="metric-label">目标总数</span>
+              <strong id="metric-targets">--</strong>
+              <small>已纳入调度的应用</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">最近正常</span>
+              <strong id="metric-healthy">--</strong>
+              <small>最近一次巡检成功</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">连续失败</span>
+              <strong id="metric-failing">--</strong>
+              <small>需要优先关注</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">已暂停</span>
+              <strong id="metric-paused">--</strong>
+              <small>暂不参与自动调度</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">累计访问</span>
+              <strong id="metric-visits">--</strong>
+              <small>自进程启动以来</small>
+            </article>
+          </section>
+
+          <section class="panel targets-panel" aria-labelledby="targets-title">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">目标</p>
+                <h2 id="targets-title">保活目标</h2>
+              </div>
+              <div class="panel-heading-actions">
+                <span class="panel-hint">每 10 秒自动刷新</span>
+                <button class="button button-primary button-small" id="add-target-secondary" type="button">
+                  添加目标
+                </button>
+              </div>
+            </div>
+
+            <div class="target-toolbar">
+              <label class="target-search" for="target-search">
+                <span class="target-search-icon" aria-hidden="true"></span>
+                <span class="sr-only">搜索保活目标</span>
+                <input id="target-search" type="search" autocomplete="off" placeholder="搜索 ID、账号或网页地址">
+              </label>
+              <div class="filter-chips" id="target-filters" role="group" aria-label="筛选保活目标">
+                <button class="filter-chip is-active" type="button" data-filter="all" aria-pressed="true">全部</button>
+                <button class="filter-chip" type="button" data-filter="healthy" aria-pressed="false">正常</button>
+                <button class="filter-chip" type="button" data-filter="failing" aria-pressed="false">失败</button>
+                <button class="filter-chip" type="button" data-filter="paused" aria-pressed="false">暂停</button>
+                <button class="filter-chip" type="button" data-filter="waiting" aria-pressed="false">等待</button>
+              </div>
+              <div class="target-transfer-actions">
+                <button class="button button-quiet button-small" id="export-targets-button" type="button">导出</button>
+                <button class="button button-quiet button-small" id="import-targets-button" type="button">导入</button>
+                <input id="target-import-file" type="file" accept="application/json,.json" hidden>
+              </div>
+            </div>
+            <p class="target-filter-summary" id="target-filter-summary" aria-live="polite"></p>
+            <div class="targets-grid" id="targets-list">
+              <div class="empty-state">正在加载目标…</div>
+            </div>
+          </section>
+
+          <section class="panel activity-panel" aria-labelledby="activity-title">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">活动</p>
+                <h2 id="activity-title">最近事件</h2>
+              </div>
+              <span class="panel-hint" id="activity-count">0 条</span>
+            </div>
+            <div class="activity-list" id="activity-list">
+              <div class="empty-state">暂无事件</div>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <span>Blitz Keepalive 管理控制台</span>
+        <span>网页目标保存在 data/managed-targets.json</span>
+      </footer>
+    </div>
+
+    <dialog class="target-dialog" id="target-dialog" aria-labelledby="target-dialog-title">
+      <form class="target-form" id="target-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">目标配置</p>
+            <h2 id="target-dialog-title">添加保活目标</h2>
+          </div>
+          <button class="icon-button" id="target-cancel-x" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="dialog-intro">保存后会立即加入调度；首次访问会在约 1 秒后开始。</p>
+        <div class="form-grid">
+          <div class="field field-wide">
+            <label for="target-url">网页地址 <span aria-hidden="true">*</span></label>
+            <input id="target-url" name="url" type="url" maxlength="2048" placeholder="https://example.blitz.cloud" required>
+            <small>仅支持 http:// 或 https:// 地址。</small>
+          </div>
+          <div class="field">
+            <label for="target-id">目标名称</label>
+            <input id="target-id" name="id" type="text" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" placeholder="留空自动生成">
+            <small>可选，字母、数字、点、下划线、短横线。</small>
+          </div>
+          <div class="field">
+            <label for="target-account">账号备注</label>
+            <input id="target-account" name="account" type="text" maxlength="100" placeholder="例如 alice">
+            <small>仅用于管理端区分，不会用于登录。</small>
+          </div>
+          <div class="field field-wide">
+            <label for="target-login-password">后台访问密码</label>
+            <input id="target-login-password" name="loginPassword" type="password" maxlength="512" autocomplete="new-password" placeholder="可选，填写目标后台的密码">
+            <small id="target-login-password-hint">填写后巡检会自动登录目标后台；留空不配置。</small>
+            <label class="checkbox-row" id="target-clear-password-wrap" hidden>
+              <input id="target-clear-password" type="checkbox">
+              <span>清除已保存的访问密码</span>
+            </label>
+          </div>
+          <div class="field">
+            <label for="target-interval">巡检间隔（分钟） <span aria-hidden="true">*</span></label>
+            <input id="target-interval" name="intervalMin" type="number" min="1" max="29" step="1" value="20" required>
+            <small>必须小于 30 分钟，默认 20 分钟。</small>
+          </div>
+          <div class="field">
+            <label for="target-jitter">随机抖动（分钟） <span aria-hidden="true">*</span></label>
+            <input id="target-jitter" name="jitterMin" type="number" min="0" max="10" step="1" value="2" required>
+            <small>在间隔上增加 0–10 分钟随机延迟。</small>
+          </div>
+          <div class="field field-wide">
+            <label for="target-expect">期望文本</label>
+            <textarea id="target-expect" name="expect" maxlength="500" rows="3" placeholder="例如 Dashboard（可选）"></textarea>
+            <small>找到这段文本才视为页面真正就绪。</small>
+          </div>
+          <div class="field field-wide">
+            <label for="target-login-success-selector">登录成功选择器</label>
+            <input id="target-login-success-selector" name="loginSuccessSelector" type="text" maxlength="300" placeholder="例如 #dashboard 或 [data-signed-in]">
+            <small>配置后台访问密码时，需填写期望文本或此 CSS 选择器中的至少一项。</small>
+          </div>
+        </div>
+        <p class="form-error" id="target-form-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" id="target-cancel" type="button">取消</button>
+          <button class="button button-primary" id="target-save" type="submit">保存目标</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="security-dialog" id="security-dialog" aria-labelledby="security-dialog-title">
+      <form class="security-form" id="password-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">账户安全</p>
+            <h2 id="security-dialog-title">修改管理密码</h2>
+          </div>
+          <button class="icon-button" id="password-cancel-x" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="dialog-intro">修改后密码会以 scrypt 哈希保存到服务端，其他已登录会话将立即失效。</p>
+        <div class="form-grid password-form-grid">
+          <div class="field field-wide">
+            <label for="current-password">当前管理密码 <span aria-hidden="true">*</span></label>
+            <input id="current-password" name="currentPassword" type="password" autocomplete="current-password" maxlength="1024" required>
+          </div>
+          <div class="field field-wide">
+            <label for="new-password">新管理密码 <span aria-hidden="true">*</span></label>
+            <input id="new-password" name="newPassword" type="password" autocomplete="new-password" minlength="10" maxlength="256" required>
+            <small>至少 10 个字符，建议使用长随机密码。</small>
+          </div>
+          <div class="field field-wide">
+            <label for="confirm-password">确认新密码 <span aria-hidden="true">*</span></label>
+            <input id="confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="10" maxlength="256" required>
+          </div>
+        </div>
+        <p class="form-error" id="password-form-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="button button-quiet" id="password-cancel" type="button">取消</button>
+          <button class="button button-primary" id="password-save" type="submit">更新密码</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

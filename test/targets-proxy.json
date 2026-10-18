@@ -1,0 +1,29 @@
+{
+  "defaults": {
+    "intervalMin": 20,
+    "jitterMin": 0,
+    "expect": "Demo app is online",
+    "settleSec": 0,
+    "retries": 0
+  },
+  "maxConcurrent": 1,
+  "targets": [
+    {
+      "id": "via-explicit-proxy",
+      "url": "http://127.0.0.1:8862/",
+      "proxy": "http://127.0.0.1:8872",
+      "proxyUsername": "user",
+      "proxyPassword": "pass",
+      "proxyBypass": "<-loopback>"
+    },
+    {
+      "id": "proxy-disabled",
+      "url": "http://127.0.0.1:8862/",
+      "proxy": ""
+    },
+    {
+      "id": "inherits-dead-proxy",
+      "url": "http://127.0.0.1:8862/"
+    }
+  ]
+}
