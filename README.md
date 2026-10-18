@@ -1,7 +1,7 @@
 # blitz.cloud 保活方案：用服务器上的真实浏览器定时访问
 
 > 目标：让 blitz.cloud **免费版**应用不进入休眠（30 分钟无访客 → 缩容到 0）。
-> 支持两种用法：**单个应用**，或**多个账号 / 多个应用**共用一个常驻进程。
+> 默认由 **/admin 管理后台**添加需要保活的目标；也保留 `--url` / `--config` 供本地验证或一次性自动化使用。
 > 做法：在**你自己的服务器**上常驻无头 Chrome/Edge，按目标列表错峰真实访问页面。
 > 代码已在本机（Windows + Chrome 155）用模拟的 blitz 休眠/唤醒行为跑通，见「验证结果」。
 
@@ -301,19 +301,22 @@ node keepalive.mjs --port=8080 --admin-password="换成足够长的随机密码"
 
 ### 7.4 Windows：注册为计划任务（登录后常驻）
 
-单应用：
+推荐（目标由管理后台添加）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1
+```
+
+高级用法（单目标/多目标直接通过命令行启动）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 `
   -Url https://你的应用.blitz.cloud -Expect "页面上的独有文字"
-```
 
-多账号：
-
-```powershell
 powershell -ExecutionPolicy Bypass -File deploy\windows\install-task.ps1 -Config config.json
 ```
 
+- 默认启动管理后台 `http://127.0.0.1:8080/admin`，首次登录后添加目标；可用 `-Port` 修改端口。
 - 会写入 `.env`、注册 `BlitzKeepAlive` 计划任务并立即启动。
 - 以 SYSTEM 身份开机启动（无需登录）：追加 `-RunAsSystem`。
 - 无管理员权限时用 `-StartupFolder`：在当前用户 Startup 目录放一个隐藏启动器，登录后自动运行。
@@ -334,7 +337,7 @@ sudo useradd -r -s /usr/sbin/nologin blitzkeep
 sudo mkdir -p /opt/blitz-keepalive && sudo chown blitzkeep: /opt/blitz-keepalive
 # 把本目录内容拷到 /opt/blitz-keepalive，然后
 cd /opt/blitz-keepalive && npm install --omit=dev
-cp .env.example .env && vi .env        # 填 BLITZ_URL 或 CONFIG_FILE
+cp .env.example .env && vi .env        # 设置 PORT、ADMIN_PASSWORD；目标稍后在 /admin 添加
 sudo cp deploy/linux/blitz-keepalive.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now blitz-keepalive
@@ -401,8 +404,6 @@ docker buildx build --platform linux/amd64 \
 | --- | --- |
 | 镜像 | `<user>/blitz-keepalive:1.0.0` |
 | 端口 | `8080` |
-| `BLITZ_URL` | `https://app-b.bob.blitz.cloud`（**对端**应用） |
-| `EXPECT_TEXT` | 对端页面独有文字（强烈建议） |
 | `INTERVAL_MIN` / `JITTER_MIN` | `20` / `2`（两边错开，例如一边 18/3） |
 | `ADMIN_PASSWORD` | 管理网页登录密码；使用强随机值，并通过 HTTPS 访问 |
 | `ADMIN_PASSWORD_FILE` | `/app/data/admin-auth.json`；网页修改后的 scrypt 密码哈希，优先于环境变量 |
@@ -417,19 +418,30 @@ docker buildx build --platform linux/amd64 \
 
 本地 `compose.yaml` 已为两个服务分别挂载 `./data/peer-a` 和 `./data/peer-b`。首次启动应通过 `PEER_A_ADMIN_PASSWORD` / `PEER_B_ADMIN_PASSWORD` 或 blitz 环境变量设置强密码；之后也可复用卷中已存在的 `admin-auth.json`。两者都不存在时容器会因 `PORT requires ADMIN_PASSWORD` 校验而拒绝启动。
 
-账号 B 的应用（`keeper-b`）同样配置，`BLITZ_URL` 指向 A 的应用。
+账号 B 的应用（`keeper-b`）同样配置。部署完成后分别打开两个应用的 `/admin`，登录后把**对端**应用的公网 URL 添加到目标列表；目标保存在持久化卷中，重启不会丢失。
 
 部署完成后访问 `https://keeper-a.alice.blitz.cloud/healthz`，应返回：
 
 ```json
-{"status":"ok","targetCount":1,"visits":3,"failures":0,"lastVisitAt":"...","lastTarget":"app-b.bob.blitz.cloud","uptimeSec":900}
+{"status":"ok","targetCount":0,"visits":0,"failures":0,"lastVisitAt":null,"lastTarget":null,"uptimeSec":900}
 ```
 
 使用 `curl -H "X-Status-Token: <token>" https://keeper-a.alice.blitz.cloud/status` 可以查看每个目标的 `nextDue`、`lastResult`、`consecutiveFailures`，用于确认访问节奏。不要把令牌放进 URL。
 
+
+### 8.3.1 运行时提示 `Cannot find module '/app/keepalive.mjs'` 时
+
+这不是目标地址配置问题，而是 Blitz 实际启动的镜像或启动命令没有使用当前 Dockerfile。请按顺序检查：
+
+1. 确认 Blitz 的构建提交包含本仓库最新的 `Dockerfile`，并重新触发部署；不要继续使用旧提交（例如 `406fd8d`）。
+2. 在应用的高级设置中检查启动命令覆盖项。推荐留空以使用 Dockerfile 的 `CMD`；如需显式填写，使用 `node /app/keepalive.mjs`，不要填写旧路径或旧脚本名。
+3. 构建日志中应能看到 `COPY keepalive.mjs /app/keepalive.mjs`，且构建阶段的入口文件校验通过；若校验失败，说明部署的提交或构建上下文不包含 `keepalive.mjs`。
+4. 运行环境只需配置 `ADMIN_PASSWORD`（或已持久化的 `ADMIN_PASSWORD_FILE`）；不要再配置 `BLITZ_URL`。保活地址登录 `/admin` 后添加。
+5. 确认 `/app/data` 已挂载到 Blitz 持久化卷，否则后台目标和修改后的密码会在重建后丢失。
+
 ### 8.4 加固建议
 
-- **自访问**：把自身 URL 也加进目标列表（用 `CONFIG_FILE` 而不是 `BLITZ_URL`），对端故障时至少自己还能维持自己醒着。
+- **自访问**：在 `/admin` 中把自身 URL 也加进目标列表，对端故障时至少自己还能维持自己醒着。
 - **外部看门狗**：另一台机器（或上一节的独立 agent）每 30 分钟打开一次任一应用，专门用于打破「双双休眠」。
 - **错开节奏**：两边 `INTERVAL_MIN` / `JITTER_MIN` 不同，避免同一时刻互相访问、也降低规律性。
 - **部署后手动访问**：部署/更新窗口是两个应用最可能同时休眠的时刻。
@@ -453,12 +465,16 @@ docker run -d --name fake-a --network keepalive-test -e BIND=0.0.0.0 \
 docker run -d --name fake-b --network keepalive-test -e BIND=0.0.0.0 \
   -v "$PWD/test:/app/test:ro" node:22-alpine node /app/test/fake-blitz.mjs 8788
 docker run -d --name ka-a --network keepalive-test -p 8091:8080 \
-  -e BLITZ_URL=http://fake-b:8788/ -e "EXPECT_TEXT=Demo app is online" \
+  -e ADMIN_PASSWORD="local-test-password" \
+  -e TARGET_URL_ALLOWLIST=fake-b -e TARGET_URL_ALLOW_PRIVATE=true \
   -e INTERVAL_MIN=1 -e JITTER_MIN=0 -e SETTLE_SEC=1 blitz-keepalive:local
 docker run -d --name ka-b --network keepalive-test -p 8092:8080 \
-  -e BLITZ_URL=http://fake-a:8787/ -e "EXPECT_TEXT=Demo app is online" \
+  -e ADMIN_PASSWORD="local-test-password" \
+  -e TARGET_URL_ALLOWLIST=fake-a -e TARGET_URL_ALLOW_PRIVATE=true \
   -e INTERVAL_MIN=1 -e JITTER_MIN=0 -e SETTLE_SEC=1 blitz-keepalive:local
 ```
+
+启动后分别打开 `http://127.0.0.1:8091/admin` 和 `http://127.0.0.1:8092/admin`，登录后把 `http://fake-b:8788/` / `http://fake-a:8787/` 添加到各自目标列表。
 
 注意：模拟器走的是明文 HTTP，Chrome 对非安全来源不发 `Sec-Fetch-*`，所以模拟器用 `Upgrade-Insecure-Requests` 作为回退判据；真实的 `https://*.blitz.cloud` 一定带 `Sec-Fetch-Mode: navigate`。
 
@@ -623,7 +639,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 
 ## 12. 参数速查
 
-命令行参数（也可用同名环境变量，见 `.env.example`）：
+命令行参数（目标地址只通过 `--url` / `--config` 或 `/admin` 提供；其他参数可使用同名环境变量，见 `.env.example`）：
 
 ```
 --config=<file>     多目标 JSON（与 --url 二选一）
@@ -669,7 +685,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --dump-failures=false  关闭失败现场落盘
 ```
 
-环境变量：`BLITZ_URL`、`CONFIG_FILE`、`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。
+环境变量：`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。
 
 备份脚本另外读取 `BACKUP_PASSPHRASE` 或 `BACKUP_PASSPHRASE_FILE`；这两个变量不会被保活进程使用。
 

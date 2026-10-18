@@ -1,0 +1,302 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - link "blitz.cloud" [ref=e4] [cursor=pointer]:
+        - /url: /
+      - navigation "Main" [ref=e7]:
+        - link "Apps" [ref=e8] [cursor=pointer]:
+          - /url: /apps/
+        - link "Docs" [ref=e9] [cursor=pointer]:
+          - /url: /docs/
+        - link "Guides" [ref=e10] [cursor=pointer]:
+          - /url: /guides/
+        - link "Compare" [ref=e11] [cursor=pointer]:
+          - /url: /compare/
+        - link "Pricing" [ref=e12] [cursor=pointer]:
+          - /url: /pricing/
+      - group [ref=e13]:
+        - 'generic "Language: English" [ref=e14] [cursor=pointer]': English
+      - button "Switch to the dark theme" [ref=e21] [cursor=pointer]
+      - link "Sign in" [ref=e24] [cursor=pointer]:
+        - /url: https://dashboard.blitz.cloud/
+      - link "Start free" [ref=e25] [cursor=pointer]:
+        - /url: https://dashboard.blitz.cloud/auth/login?register=1
+  - main [ref=e26]:
+    - complementary "On this page" [ref=e27]:
+      - paragraph [ref=e28]: On this page
+      - link "Requirements for the image" [ref=e29] [cursor=pointer]:
+        - /url: "#requirements-for-the-image"
+      - link "Step by step" [ref=e30] [cursor=pointer]:
+        - /url: "#step-by-step"
+      - link "What blitz.cloud detects" [ref=e31] [cursor=pointer]:
+        - /url: "#what-blitz-cloud-detects"
+      - link "Environment variables" [ref=e32] [cursor=pointer]:
+        - /url: "#environment-variables"
+      - link "Databases" [ref=e33] [cursor=pointer]:
+        - /url: "#databases"
+      - link "Persistent storage" [ref=e34] [cursor=pointer]:
+        - /url: "#persistent-storage"
+      - link "Health checks" [ref=e35] [cursor=pointer]:
+        - /url: "#health-checks"
+      - link "Automatic updates" [ref=e36] [cursor=pointer]:
+        - /url: "#automatic-updates"
+      - link "Common problems" [ref=e37] [cursor=pointer]:
+        - /url: "#common-problems"
+      - link "Can I deploy from GitHub instead?" [ref=e38] [cursor=pointer]:
+        - /url: "#can-i-deploy-from-github-instead"
+    - article [ref=e39]:
+      - navigation "Breadcrumb" [ref=e40]:
+        - generic [ref=e41]:
+          - link "Home" [ref=e42] [cursor=pointer]:
+            - /url: /
+          - text: /
+        - generic [ref=e43]:
+          - link "Docs" [ref=e44] [cursor=pointer]:
+            - /url: /docs/
+          - text: /
+      - heading "Deploy a Docker image on blitz.cloud" [level=1] [ref=e45]
+      - paragraph [ref=e46]: Run any public Docker image on blitz.cloud, from Docker Hub, ghcr.io or Quay, with HTTPS, environment variables and persistent storage built in.
+      - paragraph [ref=e47]:
+        - text: Updated
+        - time [ref=e48]: 26 September 2026
+      - generic [ref=e49]:
+        - paragraph [ref=e50]:
+          - text: You can deploy any public Docker image that is built for amd64, from Docker Hub, GitHub's registry (
+          - code [ref=e51]: ghcr.io
+          - text: ), Quay or another public registry. In the dashboard, click "Host something new", choose "An app from Docker Hub", search for the image by name or type its full name, pick a tag and a subdomain, and blitz.cloud works out the port and runs the container with HTTPS in front of it.
+        - heading [level=2] [ref=e52]:
+          - link "Requirements for the image" [ref=e53] [cursor=pointer]:
+            - /url: "#requirements-for-the-image"
+        - table [ref=e55]:
+          - rowgroup [ref=e56]:
+            - row [ref=e57]:
+              - columnheader "Requirement" [ref=e58]
+              - columnheader "Why" [ref=e59]
+          - rowgroup [ref=e60]:
+            - row [ref=e61]:
+              - cell "A public image" [ref=e62]
+              - cell "Docker Hub, ghcr.io, Quay and other public registries work. Private images, and images on private network addresses, can't be used." [ref=e63]
+            - row [ref=e64]:
+              - cell [ref=e65]:
+                - text: Built for
+                - code [ref=e66]: linux/amd64
+              - cell "Our servers are x86. An arm64-only image will not start." [ref=e67]
+            - row [ref=e68]:
+              - cell "Serves HTTP on one TCP port" [ref=e69]
+              - cell "Visitors reach that port through HTTPS on your address." [ref=e70]
+        - paragraph [ref=e71]:
+          - text: Root is fine. Every app runs in its own gVisor sandbox, so an image that starts as root, like the official
+          - code [ref=e72]: nginx
+          - text: ", runs as root inside that sandbox and nowhere else. An image that names a user runs as that user. The wizard tells you when an image runs as root."
+        - paragraph [ref=e73]: An app you deployed before 25 September 2026 keeps running as uid 1000 until it restarts. Restart it once from its page and it starts as its image expects.
+        - heading [level=2] [ref=e74]:
+          - link "Step by step" [ref=e75] [cursor=pointer]:
+            - /url: "#step-by-step"
+        - list [ref=e76]:
+          - listitem [ref=e77]:
+            - text: Open
+            - link "dashboard.blitz.cloud" [ref=e78] [cursor=pointer]:
+              - /url: https://dashboard.blitz.cloud/
+            - text: and click "Host something new".
+          - listitem [ref=e79]:
+            - text: Choose "An app from Docker Hub" and type part of the name, for example
+            - code [ref=e80]: uptime-kuma
+            - text: or
+            - code [ref=e81]: yourname/yourapp
+            - text: . The wizard searches Docker Hub as you type, and official images are marked. For another registry, type the full name, such as
+            - code [ref=e82]: ghcr.io/yourname/yourapp
+            - text: .
+          - listitem [ref=e83]:
+            - text: Pick a tag. The wizard lists the image's real tags and preselects the one that follows new releases, like
+            - code [ref=e84]: latest
+            - text: or a major version.
+          - listitem [ref=e85]:
+            - text: "Give the app a short name. That becomes the subdomain:"
+            - code [ref=e86]: backend
+            - text: turns into
+            - code [ref=e87]: backend.<you>.blitz.cloud
+            - text: .
+          - listitem [ref=e88]: Check what blitz.cloud detected, then click "Put it online".
+        - paragraph [ref=e89]: A repository you pushed a few minutes ago may not show up in Docker Hub search right away. Docker Hub indexes new repositories with some delay.
+        - heading [level=2] [ref=e90]:
+          - link "What blitz.cloud detects" [ref=e91] [cursor=pointer]:
+            - /url: "#what-blitz-cloud-detects"
+        - paragraph [ref=e92]:
+          - text: "When you pick an image, we read what the image declares about itself: exposed ports, volumes and environment variable names. A language model then fills in what metadata can't tell, such as \"WordPress wants MariaDB and reads"
+          - code [ref=e93]: WORDPRESS_DB_HOST
+          - text: "\". The image stays the authority on its own ports. If the model suggests a port the image doesn't expose, the image wins."
+        - paragraph [ref=e94]: "The port is chosen in this order:"
+        - list [ref=e95]:
+          - listitem [ref=e96]:
+            - text: A port the image declares with
+            - code [ref=e97]: EXPOSE
+          - listitem [ref=e98]: "If it declares several: 80, 8080, 3000, 8000, 5000, otherwise the lowest"
+          - listitem [ref=e99]: If it declares none, the model's suggestion
+          - listitem [ref=e100]: If nothing is known, 80
+        - paragraph [ref=e101]: You can override the port, the database and the kept folders under "Advanced settings" in the wizard. It's closed by default because most images don't need it.
+        - heading [level=2] [ref=e102]:
+          - link "Environment variables" [ref=e103] [cursor=pointer]:
+            - /url: "#environment-variables"
+        - paragraph [ref=e104]:
+          - text: Set environment variables on the app's Environment tab. They are encrypted before they are stored, and each app can have up to 64. Changes apply the next time the app restarts, and the restart button is right next to that sentence. See
+          - link "settings and files" [ref=e105] [cursor=pointer]:
+            - /url: /docs/settings-and-files/
+          - text: .
+        - heading [level=2] [ref=e106]:
+          - link "Databases" [ref=e107] [cursor=pointer]:
+            - /url: "#databases"
+        - paragraph [ref=e108]:
+          - text: If the image needs a database, blitz.cloud can create one and inject the connection details as environment variables. Where the variable names are known, they are filled in for you and shown before anything is applied. If they aren't known, the app gets
+          - code [ref=e109]: DATABASE_URL
+          - text: . See
+          - link "databases" [ref=e110] [cursor=pointer]:
+            - /url: /docs/databases/
+          - text: .
+        - heading [level=2] [ref=e111]:
+          - link "Persistent storage" [ref=e112] [cursor=pointer]:
+            - /url: "#persistent-storage"
+        - paragraph [ref=e113]: Folders the image declares as volumes, plus any the detection adds, survive restarts. An app from a pasted image can keep up to 6 folders and reserves 1 GB of your storage. On Pro these folders are copied every night. On the free plan only databases are.
+        - heading [level=2] [ref=e114]:
+          - link "Health checks" [ref=e115] [cursor=pointer]:
+            - /url: "#health-checks"
+        - paragraph [ref=e116]: For a Docker image we check whether the port accepts connections before sending traffic to it. There's no automatic restart for pasted images, because restarting an app nobody has vetted can break something that was working. Apps from the App Store get a proper HTTP check and are restarted if they stop answering.
+        - heading [level=2] [ref=e117]:
+          - link "Automatic updates" [ref=e118] [cursor=pointer]:
+            - /url: "#automatic-updates"
+        - paragraph [ref=e119]:
+          - text: With automatic updates switched on (the default for a moving tag such as
+          - code [ref=e120]: latest
+          - text: or
+          - code [ref=e121]: alpine
+          - text: ), we look every night around 4:00 UTC at where the tag points. The first night only records it. From then on, when the tag has moved to a newer build, we put that exact version online, pinned by its digest, so what runs is what was checked. If the new version does not start within ten minutes, we put the version before back, say so on the Activity tab, and switch automatic updates off for that app until you turn them on again.
+        - paragraph [ref=e122]: While the new version starts, the app shows Updating and the version before keeps running. We send you a mail after each overnight update. You can switch that off under Settings > Notifications.
+        - paragraph [ref=e123]:
+          - text: The check works for images on Docker Hub, GitHub's registry (
+          - code [ref=e124]: ghcr.io
+          - text: ), Quay, lscr.io, GitLab, and the public registries of Amazon and Microsoft. The app's Settings tab says so when an image is somewhere else.
+        - heading [level=2] [ref=e125]:
+          - link "Common problems" [ref=e126] [cursor=pointer]:
+            - /url: "#common-problems"
+        - list [ref=e127]:
+          - listitem [ref=e128]: "The app stays on \"Starting\": it is probably listening on a different port than the one chosen. Change it under Port on the app's Settings tab."
+          - listitem [ref=e129]: "\"This app wants to run as root\": the app was set up before root was allowed. Restart it and it starts as root, inside its sandbox."
+          - listitem [ref=e130]: "\"Needs attention\" with a crash loop: read the last log lines shown on the page. Missing environment variables and writes to read-protected folders are the usual causes."
+          - listitem [ref=e131]: "\"There is no room on blitz.cloud for this app right now\": the cluster is full. We add servers when this happens, so try again later."
+        - paragraph [ref=e132]:
+          - text: More in
+          - link "app status and logs" [ref=e133] [cursor=pointer]:
+            - /url: /docs/app-status-and-logs/
+          - text: .
+        - heading [level=2] [ref=e134]:
+          - link "Can I deploy from GitHub instead?" [ref=e135] [cursor=pointer]:
+            - /url: "#can-i-deploy-from-github-instead"
+        - paragraph [ref=e136]:
+          - text: Yes. Paste the link of a public repository and we build the code and put it online. Connect your GitHub account and your private repositories work too, with a new version online on every push. See
+          - link "deploy a GitHub project" [ref=e137] [cursor=pointer]:
+            - /url: /docs/deploy-from-github/
+          - text: .
+      - region [ref=e138]:
+        - heading "Read next" [level=2] [ref=e139]
+        - generic [ref=e140]:
+          - link [ref=e141] [cursor=pointer]:
+            - /url: /docs/deploy-from-github/
+            - heading "Deploy a GitHub project on blitz.cloud" [level=3] [ref=e142]
+            - paragraph [ref=e143]: Connect GitHub or paste a link to a public repository, and blitz.cloud builds the code and puts it online with HTTPS, with a new version on every push. How the build works, which port is used and what fails.
+          - link [ref=e144] [cursor=pointer]:
+            - /url: /docs/getting-started/
+            - heading "Getting started with blitz.cloud" [level=3] [ref=e145]
+            - paragraph [ref=e146]: Create a free blitz.cloud account, claim your address, connect GitHub if you like, and put your first app, Docker image or project online. No credit card, no terminal needed.
+          - link [ref=e147] [cursor=pointer]:
+            - /url: /docs/app-store/
+            - heading "App Store - one-click open-source apps on blitz.cloud" [level=3] [ref=e148]
+            - paragraph [ref=e149]: The blitz.cloud App Store has 66 open-source apps. What they need in memory, space and databases, and how installing works.
+      - generic [ref=e150]:
+        - heading "Get nightly copies of your apps' files." [level=2] [ref=e151]
+        - paragraph [ref=e152]: On the free plan only databases are backed up. Pro copies the files your apps keep every night and keeps 30 nights, with a restore you can undo. 7 EUR a month, and the first month back if it isn't for you.
+        - generic [ref=e153]:
+          - link "Create a free account" [ref=e154] [cursor=pointer]:
+            - /url: https://dashboard.blitz.cloud/auth/login?register=1
+          - link "See what Pro includes" [ref=e155] [cursor=pointer]:
+            - /url: /pricing/#plans
+  - contentinfo [ref=e156]:
+    - generic [ref=e157]:
+      - generic [ref=e158]:
+        - generic [ref=e159]: blitz.cloud
+        - paragraph [ref=e162]: European hosting for apps and containers, run by BlitzWorks.
+        - link "hallo@blitzworks.io" [ref=e163] [cursor=pointer]:
+          - /url: mailto:hallo@blitzworks.io
+        - paragraph [ref=e164]: © 2026 BlitzWorks UG (haftungsbeschränkt)
+      - navigation "Product" [ref=e165]:
+        - heading "Product" [level=2] [ref=e166]
+        - link "Pricing" [ref=e167] [cursor=pointer]:
+          - /url: /pricing/
+        - link "Infrastructure designer" [ref=e168] [cursor=pointer]:
+          - /url: /infrastructure-designer/
+        - link "What's live" [ref=e169] [cursor=pointer]:
+          - /url: /whats-live/
+        - link "Changelog" [ref=e170] [cursor=pointer]:
+          - /url: /changelog/
+        - link "Data and GDPR" [ref=e171] [cursor=pointer]:
+          - /url: /eu-data/
+        - link "Status" [ref=e172] [cursor=pointer]:
+          - /url: https://status.blitz.cloud/
+      - navigation "Learn" [ref=e173]:
+        - heading "Learn" [level=2] [ref=e174]
+        - link "Docs" [ref=e175] [cursor=pointer]:
+          - /url: /docs/
+        - link "Apps" [ref=e176] [cursor=pointer]:
+          - /url: /apps/
+        - link "Guides" [ref=e177] [cursor=pointer]:
+          - /url: /guides/
+        - link "Compare" [ref=e178] [cursor=pointer]:
+          - /url: /compare/
+        - link "FAQ" [ref=e179] [cursor=pointer]:
+          - /url: /faq/
+      - navigation "Popular apps" [ref=e180]:
+        - heading "Popular apps" [level=2] [ref=e181]
+        - link "n8n" [ref=e182] [cursor=pointer]:
+          - /url: /apps/n8n/
+        - link "Nextcloud" [ref=e183] [cursor=pointer]:
+          - /url: /apps/nextcloud/
+        - link "Immich" [ref=e184] [cursor=pointer]:
+          - /url: /apps/immich/
+        - link "Vaultwarden" [ref=e185] [cursor=pointer]:
+          - /url: /apps/vaultwarden/
+        - link "Paperless-ngx" [ref=e186] [cursor=pointer]:
+          - /url: /apps/paperless-ngx/
+        - link "WordPress" [ref=e187] [cursor=pointer]:
+          - /url: /apps/wordpress/
+        - link "Uptime Kuma" [ref=e188] [cursor=pointer]:
+          - /url: /apps/uptime-kuma/
+      - navigation "Alternatives" [ref=e189]:
+        - heading "Alternatives" [level=2] [ref=e190]
+        - link "blitz.cloud vs. Heroku" [ref=e191] [cursor=pointer]:
+          - /url: /compare/heroku/
+        - link "blitz.cloud vs. Render" [ref=e192] [cursor=pointer]:
+          - /url: /compare/render/
+        - link "blitz.cloud vs. Railway" [ref=e193] [cursor=pointer]:
+          - /url: /compare/railway/
+        - link "blitz.cloud vs. Vercel" [ref=e194] [cursor=pointer]:
+          - /url: /compare/vercel/
+        - link "blitz.cloud vs. Fly.io" [ref=e195] [cursor=pointer]:
+          - /url: /compare/fly-io/
+        - link "EU alternatives" [ref=e196] [cursor=pointer]:
+          - /url: /compare/eu-paas-alternatives/
+      - navigation "Company" [ref=e197]:
+        - heading "Company" [level=2] [ref=e198]
+        - link "About" [ref=e199] [cursor=pointer]:
+          - /url: /about/
+        - link "Contact" [ref=e200] [cursor=pointer]:
+          - /url: /contact/
+        - link "Privacy" [ref=e201] [cursor=pointer]:
+          - /url: /privacy/
+        - link "Cookie policy" [ref=e202] [cursor=pointer]:
+          - /url: /cookies/
+        - link "Imprint" [ref=e203] [cursor=pointer]:
+          - /url: /imprint/
+        - link "Terms" [ref=e204] [cursor=pointer]:
+          - /url: /terms/
+        - link "Right of withdrawal" [ref=e205] [cursor=pointer]:
+          - /url: /withdrawal/
+        - link "Cancel your contract" [ref=e206] [cursor=pointer]:
+          - /url: /cancel/

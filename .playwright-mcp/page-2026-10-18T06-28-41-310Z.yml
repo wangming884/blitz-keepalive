@@ -1,0 +1,394 @@
+- generic [active] [ref=f3e1]:
+  - banner [ref=f3e2]:
+    - generic [ref=f3e3]:
+      - link "blitz.cloud" [ref=f3e4] [cursor=pointer]:
+        - /url: /
+      - navigation "Main" [ref=f3e7]:
+        - link "Apps" [ref=f3e8] [cursor=pointer]:
+          - /url: /apps/
+        - link "Docs" [ref=f3e9] [cursor=pointer]:
+          - /url: /docs/
+        - link "Guides" [ref=f3e10] [cursor=pointer]:
+          - /url: /guides/
+        - link "Compare" [ref=f3e11] [cursor=pointer]:
+          - /url: /compare/
+        - link "Pricing" [ref=f3e12] [cursor=pointer]:
+          - /url: /pricing/
+      - group [ref=f3e13]:
+        - 'generic "Language: English" [ref=f3e14] [cursor=pointer]': English
+      - button "Switch to the dark theme" [ref=f3e21] [cursor=pointer]
+      - link "Sign in" [ref=f3e24] [cursor=pointer]:
+        - /url: https://dashboard.blitz.cloud/
+      - link "Start free" [ref=f3e25] [cursor=pointer]:
+        - /url: https://dashboard.blitz.cloud/auth/login?register=1
+  - main [ref=f3e26]:
+    - complementary "On this page" [ref=f3e27]:
+      - paragraph [ref=f3e28]: On this page
+      - link "Connect GitHub" [ref=f3e29] [cursor=pointer]:
+        - /url: "#connect-github"
+      - link "Step by step" [ref=f3e30] [cursor=pointer]:
+        - /url: "#step-by-step"
+      - link "How the build works" [ref=f3e31] [cursor=pointer]:
+        - /url: "#how-the-build-works"
+      - link "When a build fails" [ref=f3e32] [cursor=pointer]:
+        - /url: "#when-a-build-fails"
+      - link "Which port your app listens on" [ref=f3e33] [cursor=pointer]:
+        - /url: "#which-port-your-app-listens-on"
+      - link "When your code changes" [ref=f3e34] [cursor=pointer]:
+        - /url: "#when-your-code-changes"
+      - link "Private repositories" [ref=f3e35] [cursor=pointer]:
+        - /url: "#private-repositories"
+      - link "A public address that isn't GitHub" [ref=f3e36] [cursor=pointer]:
+        - /url: "#a-public-address-that-isn-t-github"
+      - link "Environment variables and databases" [ref=f3e37] [cursor=pointer]:
+        - /url: "#environment-variables-and-databases"
+      - link "Common problems" [ref=f3e38] [cursor=pointer]:
+        - /url: "#common-problems"
+      - link "Several services in one repository" [ref=f3e39] [cursor=pointer]:
+        - /url: "#several-services-in-one-repository"
+      - link "Bots and background workers" [ref=f3e40] [cursor=pointer]:
+        - /url: "#bots-and-background-workers"
+      - link "Monorepos" [ref=f3e41] [cursor=pointer]:
+        - /url: "#monorepos"
+    - article [ref=f3e42]:
+      - navigation "Breadcrumb" [ref=f3e43]:
+        - generic [ref=f3e44]:
+          - link "Home" [ref=f3e45] [cursor=pointer]:
+            - /url: /
+          - text: /
+        - generic [ref=f3e46]:
+          - link "Docs" [ref=f3e47] [cursor=pointer]:
+            - /url: /docs/
+          - text: /
+      - heading "Deploy a GitHub project on blitz.cloud" [level=1] [ref=f3e48]
+      - paragraph [ref=f3e49]: Connect GitHub or paste a link to a public repository, and blitz.cloud builds the code and puts it online with HTTPS, with a new version on every push. How the build works, which port is used and what fails.
+      - paragraph [ref=f3e50]:
+        - text: Updated
+        - time [ref=f3e51]: 9 October 2026
+      - generic [ref=f3e52]:
+        - paragraph [ref=f3e53]: Connect your GitHub account and blitz.cloud builds your projects, private ones included, and puts a new version online every time you push. You can also skip connecting and paste a link to any public GitHub repository. It does not have to be your repository. We clone it, build it and run the result under your address with HTTPS. If the project has a Dockerfile we use it; if it does not, we write one from what is in the repo, and rewrite it if the build fails.
+        - heading [level=2] [ref=f3e54]:
+          - link "Connect GitHub" [ref=f3e55] [cursor=pointer]:
+            - /url: "#connect-github"
+        - paragraph [ref=f3e56]: "Click \"Connect GitHub\" during onboarding or on the Settings page. GitHub then asks which repositories blitz.cloud may read: all of them, or only the ones you pick. You can change that choice on GitHub at any time."
+        - paragraph [ref=f3e57]: "Once it is connected:"
+        - list [ref=f3e58]:
+          - listitem [ref=f3e59]: "\"My own code\" lists your projects with a search field. Private ones are marked Private. A project that is missing is one blitz.cloud may not read yet, and \"Choose which projects on GitHub\" takes you to the list at GitHub."
+          - listitem [ref=f3e60]: Every push to the app's branch is built and put online by itself.
+        - paragraph [ref=f3e61]: With or without a connection, you pick the branch from a list, in the wizard under "Advanced settings" and later on the app's Settings tab.
+        - heading [level=2] [ref=f3e62]:
+          - link "Step by step" [ref=f3e63] [cursor=pointer]:
+            - /url: "#step-by-step"
+        - list [ref=f3e64]:
+          - listitem [ref=f3e65]:
+            - text: Open
+            - link "dashboard.blitz.cloud" [ref=f3e66] [cursor=pointer]:
+              - /url: https://dashboard.blitz.cloud/
+            - text: and click "Host something new".
+          - listitem [ref=f3e67]: Choose "My own code".
+          - listitem [ref=f3e68]:
+            - text: Pick one of your projects, or paste a link, for example
+            - code [ref=f3e69]: github.com/docker/welcome-to-docker
+            - text: ", and click Continue."
+          - listitem [ref=f3e70]:
+            - text: "Give the app a short name. That becomes the subdomain:"
+            - code [ref=f3e71]: demo
+            - text: turns into
+            - code [ref=f3e72]: demo.<you>.blitz.cloud
+            - text: .
+          - listitem [ref=f3e73]: Click "Build it and put it online" and watch it happen.
+        - paragraph [ref=f3e74]: The first build takes a few minutes, because everything the project needs is downloaded from scratch. Later builds of the same project reuse the layers that did not change.
+        - paragraph [ref=f3e75]: While it builds, the app's Overview shows each step as it happens, and your place in the queue if builds are waiting. Builds run on their own build servers. The free plan builds one project at a time, Pro builds three at once and goes ahead of the queue.
+        - heading [level=2] [ref=f3e76]:
+          - link "How the build works" [ref=f3e77] [cursor=pointer]:
+            - /url: "#how-the-build-works"
+        - table [ref=f3e79]:
+          - rowgroup [ref=f3e80]:
+            - row [ref=f3e81]:
+              - columnheader "Your project has" [ref=f3e82]
+              - columnheader "What we do" [ref=f3e83]
+          - rowgroup [ref=f3e84]:
+            - row [ref=f3e85]:
+              - cell [ref=f3e86]:
+                - text: A
+                - code [ref=f3e87]: Dockerfile
+                - text: in the root, or in
+                - code [ref=f3e88]: docker/
+              - cell "We build it" [ref=f3e89]
+            - row [ref=f3e90]:
+              - cell [ref=f3e91]:
+                - text: Other Dockerfiles, such as
+                - code [ref=f3e92]: bot.Dockerfile
+                - text: or
+                - code [ref=f3e93]: api/Dockerfile
+              - cell "We look through the whole project and pick the one that is the app, or build the one you pick under \"Advanced settings\"" [ref=f3e94]
+            - row [ref=f3e95]:
+              - cell "No Dockerfile" [ref=f3e96]
+              - cell "We write one. A language model reads the file listing and the manifests (package.json, requirements.txt, go.mod and the like), writes a Dockerfile, and the build is what decides whether it was right" [ref=f3e97]
+        - paragraph [ref=f3e98]: Both run in a sandbox with no access to anything of ours or anyone else's. A build can reach the internet to download dependencies, and nothing on the private network.
+        - paragraph [ref=f3e99]: "A build gets the size the project needs: small (1 core, 2 GB, up to 4 cores), medium (2 cores, 5 GB, up to 6 cores) or large (4 cores, 10 GB, up to 7 cores). The memory of each size is fixed; the cores can grow when the build server has some to spare. The first build is sized by what kind of project it is. After that, every build measures how much memory it used, and the next one is sized from that. The build log says which size it got and why."
+        - paragraph [ref=f3e100]:
+          - text: When a written Dockerfile does not build, the model reads the end of the log and rewrites it, up to three times. The Dockerfile we wrote is shown under the log of every such build. Copy it into your project as
+          - code [ref=f3e101]: Dockerfile
+          - text: if you want the build to be the same every time, and we use yours from then on.
+        - paragraph [ref=f3e102]: A recipe that worked is kept. The next commit builds with it, and we only write a new one when that build fails. The recipe is also remembered against that exact code, by commit and by content. If somebody else deploys the same public project at the same commit, or the same content under another name, their build starts from what we already worked out and nobody asks a model again. Plans from private repositories are never shared.
+        - paragraph [ref=f3e103]: "Content of your repository is treated as data when we write a Dockerfile: a README that tries to give the model instructions is a README. The recipe is checked before it is built, and the build runs in the same sandbox as everything else."
+        - heading [level=2] [ref=f3e104]:
+          - link "When a build fails" [ref=f3e105] [cursor=pointer]:
+            - /url: "#when-a-build-fails"
+        - paragraph [ref=f3e106]: When a build or the first start fails and our own retries are used up, the app page says what went wrong in one sentence and lists the steps that fix it, each with its own button. Paste a key (with a note on where to find it), set up a database, use another Dockerfile, or let us write one. What blitz.cloud can do safely, it does by itself and ticks off. It never makes up a key or an address that belongs to somebody else.
+        - paragraph [ref=f3e107]:
+          - text: Some problems are named exactly. When the code asks for
+          - code [ref=f3e108]: 9O6A5180.jpg
+          - text: and the repository has
+          - code [ref=f3e109]: 9O6A5180.JPG
+          - text: ", the page says so, with the file and the line that asks. Windows and macOS ignore capital letters in file names, our servers do not."
+        - paragraph [ref=f3e110]: The full build log is on the app's Overview while it builds, and on the Activity tab afterwards.
+        - heading [level=2] [ref=f3e111]:
+          - link "Which port your app listens on" [ref=f3e112] [cursor=pointer]:
+            - /url: "#which-port-your-app-listens-on"
+        - paragraph [ref=f3e113]:
+          - text: We tell your app to listen on
+          - code [ref=f3e114]: "8080"
+          - text: through the
+          - code [ref=f3e115]: PORT
+          - text: environment variable, which is what a Dockerfile we write uses. If your Dockerfile declares a different port with
+          - code [ref=f3e116]: EXPOSE
+          - text: ", we read that from the image after the first build and use it instead."
+        - paragraph [ref=f3e117]:
+          - text: Your app runs as the user your Dockerfile names. Without a
+          - code [ref=f3e118]: USER
+          - text: line that is root, inside the app's own gVisor sandbox, so an image that expects root works as it would on your machine.
+        - heading [level=2] [ref=f3e119]:
+          - link "When your code changes" [ref=f3e120] [cursor=pointer]:
+            - /url: "#when-your-code-changes"
+        - paragraph [ref=f3e121]: With GitHub connected, every push to the app's branch builds a new version and puts it online. Without it, click "Get the newest code" on the app's Settings tab. It builds whatever is newest on the branch and puts it online. Either way, the version currently running stays up until the new one works, so a build that fails changes nothing. If you push again while a version is being built, that build stops and the newest code is built instead. The version that is online keeps running until the new one is ready. If the new version builds but does not start within ten minutes, we put the version before back and say so on the Activity tab. Any of the last 10 versions that went live can be put back from there with "Put this version back".
+        - paragraph [ref=f3e122]: Pushes that come in quickly are built together as one build of the newest commit. On the free plan a push waits until 3 minutes go by without another one, and an app is built from pushes at most every 15 minutes. On Pro, at most every five minutes. A push whose commits all come from a bot or a GitHub workflow builds nothing, and neither does a commit whose message says [skip ci] or [skip blitz]. If one of your workflows is meant to put new versions online, switch on "Build pushes made by bots and workflows" on the app's Settings tab. An app that gets more than 12 pushes in an hour is built from pushes at most every 30 minutes until an hour goes by with fewer. "Get the newest code" always builds at once.
+        - paragraph [ref=f3e123]: With automatic updates switched on (the default), we also look every night around 4:00 UTC whether the branch has moved, and build and put the newest commit online if it has.
+        - heading [level=2] [ref=f3e124]:
+          - link "Private repositories" [ref=f3e125] [cursor=pointer]:
+            - /url: "#private-repositories"
+        - paragraph [ref=f3e126]: Connect GitHub and allow blitz.cloud to read the repository there. It then shows up under "My own code", marked Private, and builds like any other project. We only see the repositories you allowed.
+        - paragraph [ref=f3e127]:
+          - text: To write or repair a Dockerfile, the language model reads parts of the project, and for a private repository that means parts of code you have not published. What it reads is listed on
+          - link "Data and GDPR" [ref=f3e128] [cursor=pointer]:
+            - /url: /eu-data/
+          - text: .
+        - heading [level=2] [ref=f3e129]:
+          - link "A public address that isn't GitHub" [ref=f3e130] [cursor=pointer]:
+            - /url: "#a-public-address-that-isn-t-github"
+        - paragraph [ref=f3e131]:
+          - text: Paste any public
+          - code [ref=f3e132]: https://
+          - text: "git address instead of connecting an account: GitLab, Codeberg, a self-hosted Gitea or git server, anything that answers plain git-over-HTTPS. Pick \"My own code\" and paste the address where you would paste a GitHub link."
+        - paragraph [ref=f3e133]:
+          - text: This works like a public GitHub link, but with two limits. The project needs a
+          - code [ref=f3e134]: Dockerfile
+          - text: in its root. We don't write one for it and we don't look in subfolders. There is also no connected account, so nothing builds automatically when the code changes. Click "Build again" on the app's page, and we read the branch you picked again from the same address and build its newest commit.
+        - heading [level=2] [ref=f3e135]:
+          - link "Environment variables and databases" [ref=f3e136] [cursor=pointer]:
+            - /url: "#environment-variables-and-databases"
+        - paragraph [ref=f3e137]:
+          - text: Set environment variables on the app's Environment tab after the first deploy. They are encrypted before they are stored and applied on the next restart. See
+          - link "settings and files" [ref=f3e138] [cursor=pointer]:
+            - /url: /docs/settings-and-files/
+          - text: .
+        - paragraph [ref=f3e139]:
+          - text: A managed database is created from the Databases page and connected to the app there. When a build begins, we also look in the project for a database driver and the setting the code reads its address from. If the project cannot start without a database, we set one up, connect it before the app starts and say so in the build log. That happens once per app, never over a setting you made and never past your plan. See
+          - link "databases" [ref=f3e140] [cursor=pointer]:
+            - /url: /docs/databases/
+          - text: .
+        - heading [level=2] [ref=f3e141]:
+          - link "Common problems" [ref=f3e142] [cursor=pointer]:
+            - /url: "#common-problems"
+        - list [ref=f3e143]:
+          - listitem [ref=f3e144]:
+            - strong [ref=f3e145]: "\"This project has no Dockerfile, and we could not write one for it right now\""
+            - text: ": the model was unavailable or the account's AI allowance for the day is used up. Adding a Dockerfile to the repository is the reliable fix, and works without any model."
+          - listitem [ref=f3e146]:
+            - strong [ref=f3e147]: "\"We couldn't build this project\" followed by a reason"
+            - text: ": the written Dockerfile was rewritten up to three times and still failed, and the sentence says what the model saw. The full log is underneath."
+          - listitem [ref=f3e148]:
+            - strong [ref=f3e149]: The build fails while installing dependencies
+            - text: ": the log below the failure has what the installer said. A lockfile that does not match the manifest is the usual cause."
+          - listitem [ref=f3e150]:
+            - strong [ref=f3e151]: The build ran out of memory
+            - text: ": it is built again once with the next bigger builder. A large build that still runs out says it needs more memory than a build can have. Get in touch and we will look at it."
+          - listitem [ref=f3e152]:
+            - strong [ref=f3e153]: The app is "Starting" and never answers
+            - text: ": it is listening somewhere other than the port we are sending traffic to. Make it read"
+            - code [ref=f3e154]: PORT
+            - text: ", or add"
+            - code [ref=f3e155]: EXPOSE
+            - text: to the Dockerfile and deploy again.
+          - listitem [ref=f3e156]:
+            - strong [ref=f3e157]: "\"Part of this project is built for a different kind of processor\""
+            - text: ": our servers are x86. A base image that only exists for arm64 will not run."
+        - heading [level=2] [ref=f3e158]:
+          - link "Several services in one repository" [ref=f3e159] [cursor=pointer]:
+            - /url: "#several-services-in-one-repository"
+        - paragraph [ref=f3e160]:
+          - text: "A web front end, an API and a worker that share one repository go online as one app with one address. If the project has a compose file, the wizard reads it and proposes the parts it found: the front end at"
+          - code [ref=f3e161]: /
+          - text: ", the API on its own path such as"
+          - code [ref=f3e162]: /api
+          - text: ", the worker in the background. Databases and development tools in the compose file are left out, each with a reason. You can still put only one of the services online instead."
+        - list [ref=f3e163]:
+          - listitem [ref=f3e164]:
+            - text: Parts find each other by name. A setting like
+            - code [ref=f3e165]: BACKEND_SERVICE
+            - text: is filled in with that part's address inside your account, the way it worked in compose.
+          - listitem [ref=f3e166]: A part can have a Dockerfile of its own. All parts are built in one build, update together and go back together.
+          - listitem [ref=f3e167]: A step can run before each new version, like a database migration. If it fails, the version you had keeps running and the Activity tab shows what the step printed.
+          - listitem [ref=f3e168]: Each part that keeps running counts as one of your plan's apps. The step before each new version does not, and neither does a part you switched off.
+          - listitem [ref=f3e169]: Only the parts people visit go to sleep. A bot keeps running while its dashboard sleeps.
+        - paragraph [ref=f3e170]: The app's Settings tab has a Parts section for start commands, paths and switching a part off. The Logs tab switches between parts.
+        - paragraph [ref=f3e171]: "For an app of one part, you choose two things under \"Advanced settings\" in the wizard, and later on the app's Settings tab:"
+        - list [ref=f3e172]:
+          - listitem [ref=f3e173]:
+            - strong [ref=f3e174]: Dockerfile
+            - text: ": any Dockerfile we find on the branch ("
+            - code [ref=f3e175]: Dockerfile
+            - text: ","
+            - code [ref=f3e176]: Dockerfile.bot
+            - text: ","
+            - code [ref=f3e177]: api.Dockerfile
+            - text: ","
+            - code [ref=f3e178]: Containerfile
+            - text: ", in any folder), or \"Write one for me\" to have us write one even though the project has its own. Every app can use a different one."
+          - listitem [ref=f3e179]:
+            - strong [ref=f3e180]: Start command
+            - text: ": replaces the image's"
+            - code [ref=f3e181]: CMD
+            - text: and keeps its
+            - code [ref=f3e182]: ENTRYPOINT
+            - text: ", the same as"
+            - code [ref=f3e183]: docker run image <command>
+            - text: . With
+            - code [ref=f3e184]: ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
+            - text: ", a start command of"
+            - code [ref=f3e185]: bot
+            - text: runs
+            - code [ref=f3e186]: /bin/sh /app/entrypoint.sh bot
+            - text: . For more than one step, write
+            - code [ref=f3e187]: sh -c "npm run migrate && npm start"
+            - text: . The settings show what the Dockerfile starts with and what your command turns it into.
+        - paragraph [ref=f3e188]: A different Dockerfile builds the app again, and the running version stays online until the new one works. A different start command restarts the app.
+        - paragraph [ref=f3e189]:
+          - text: You often don't have to type the start command. If the project's ENTRYPOINT is a script with a
+          - code [ref=f3e190]: case "$1" in
+          - text: that lists what it accepts, or you put only one service of a compose file online, the wizard shows the services and asks which one the app is. If an app stops because nobody chose, its page offers the services as buttons. When the project doesn't say, and the first start stops without a start command, our assistant reads the project and what the app printed, and either starts it with the one service it found or offers the ones it found.
+        - heading [level=2] [ref=f3e191]:
+          - link "Bots and background workers" [ref=f3e192] [cursor=pointer]:
+            - /url: "#bots-and-background-workers"
+        - paragraph [ref=f3e193]: "A Discord bot, a queue consumer or a scheduler connects out and is never visited. Switch on \"Runs in the background\" when you name the app. It then gets no address and no port, we do not wait for it to answer on one, and it never goes to sleep. On the free plan it stops when nothing has happened in your account for 2 days: no sign-in, no deploy and no visit to the dashboard. We email you one day before. Press Start on the app's page and it runs again without a new build, for another 2 days. It counts as running once it has stayed up for 20 seconds, and if it keeps crashing the app page shows the last lines it printed, the same as for any other app. Its output is on the Logs tab."
+        - paragraph [ref=f3e194]: An app that is already online can be switched on its Settings tab with "Run it in the background", which frees its address. A background app gets an address back with "Give it one".
+        - heading [level=2] [ref=f3e195]:
+          - link "Monorepos" [ref=f3e196] [cursor=pointer]:
+            - /url: "#monorepos"
+        - paragraph [ref=f3e197]:
+          - text: To build one folder of a repository, such as
+          - code [ref=f3e198]: apps/web
+          - text: ", name it under \"Folder to build\" in the wizard's advanced settings, or later under Settings > Where new versions come from. We build that folder as if it were the whole project. The wizard suggests folders that look like a project. Without a folder, the build starts from the top folder of the repository."
+      - region [ref=f3e199]:
+        - heading "Read next" [level=2] [ref=f3e200]
+        - generic [ref=f3e201]:
+          - link [ref=f3e202] [cursor=pointer]:
+            - /url: /docs/app-store/
+            - heading "App Store - one-click open-source apps on blitz.cloud" [level=3] [ref=f3e203]
+            - paragraph [ref=f3e204]: The blitz.cloud App Store has 66 open-source apps. What they need in memory, space and databases, and how installing works.
+          - link [ref=f3e205] [cursor=pointer]:
+            - /url: /docs/deploy-docker-image/
+            - heading "Deploy a Docker image on blitz.cloud" [level=3] [ref=f3e206]
+            - paragraph [ref=f3e207]: Run any public Docker image on blitz.cloud, from Docker Hub, ghcr.io or Quay, with HTTPS, environment variables and persistent storage built in.
+          - link [ref=f3e208] [cursor=pointer]:
+            - /url: /docs/databases/
+            - heading "Managed databases on blitz.cloud - PostgreSQL, MariaDB, Redis" [level=3] [ref=f3e209]
+            - paragraph [ref=f3e210]: Create managed PostgreSQL 17, MariaDB 11.4 or Redis (Valkey 8) databases on blitz.cloud, connected to your app automatically and backed up every night.
+      - generic [ref=f3e211]:
+        - heading "Put your first app online today." [level=2] [ref=f3e212]
+        - paragraph [ref=f3e213]: Free plan, no credit card, no waiting list.
+        - link "Create a free account" [ref=f3e214] [cursor=pointer]:
+          - /url: https://dashboard.blitz.cloud/auth/login?register=1
+  - contentinfo [ref=f3e215]:
+    - generic [ref=f3e216]:
+      - generic [ref=f3e217]:
+        - generic [ref=f3e218]: blitz.cloud
+        - paragraph [ref=f3e221]: European hosting for apps and containers, run by BlitzWorks.
+        - link "hallo@blitzworks.io" [ref=f3e222] [cursor=pointer]:
+          - /url: mailto:hallo@blitzworks.io
+        - paragraph [ref=f3e223]: © 2026 BlitzWorks UG (haftungsbeschränkt)
+      - navigation "Product" [ref=f3e224]:
+        - heading "Product" [level=2] [ref=f3e225]
+        - link "Pricing" [ref=f3e226] [cursor=pointer]:
+          - /url: /pricing/
+        - link "Infrastructure designer" [ref=f3e227] [cursor=pointer]:
+          - /url: /infrastructure-designer/
+        - link "What's live" [ref=f3e228] [cursor=pointer]:
+          - /url: /whats-live/
+        - link "Changelog" [ref=f3e229] [cursor=pointer]:
+          - /url: /changelog/
+        - link "Data and GDPR" [ref=f3e230] [cursor=pointer]:
+          - /url: /eu-data/
+        - link "Status" [ref=f3e231] [cursor=pointer]:
+          - /url: https://status.blitz.cloud/
+      - navigation "Learn" [ref=f3e232]:
+        - heading "Learn" [level=2] [ref=f3e233]
+        - link "Docs" [ref=f3e234] [cursor=pointer]:
+          - /url: /docs/
+        - link "Apps" [ref=f3e235] [cursor=pointer]:
+          - /url: /apps/
+        - link "Guides" [ref=f3e236] [cursor=pointer]:
+          - /url: /guides/
+        - link "Compare" [ref=f3e237] [cursor=pointer]:
+          - /url: /compare/
+        - link "FAQ" [ref=f3e238] [cursor=pointer]:
+          - /url: /faq/
+      - navigation "Popular apps" [ref=f3e239]:
+        - heading "Popular apps" [level=2] [ref=f3e240]
+        - link "n8n" [ref=f3e241] [cursor=pointer]:
+          - /url: /apps/n8n/
+        - link "Nextcloud" [ref=f3e242] [cursor=pointer]:
+          - /url: /apps/nextcloud/
+        - link "Immich" [ref=f3e243] [cursor=pointer]:
+          - /url: /apps/immich/
+        - link "Vaultwarden" [ref=f3e244] [cursor=pointer]:
+          - /url: /apps/vaultwarden/
+        - link "Paperless-ngx" [ref=f3e245] [cursor=pointer]:
+          - /url: /apps/paperless-ngx/
+        - link "WordPress" [ref=f3e246] [cursor=pointer]:
+          - /url: /apps/wordpress/
+        - link "Uptime Kuma" [ref=f3e247] [cursor=pointer]:
+          - /url: /apps/uptime-kuma/
+      - navigation "Alternatives" [ref=f3e248]:
+        - heading "Alternatives" [level=2] [ref=f3e249]
+        - link "blitz.cloud vs. Heroku" [ref=f3e250] [cursor=pointer]:
+          - /url: /compare/heroku/
+        - link "blitz.cloud vs. Render" [ref=f3e251] [cursor=pointer]:
+          - /url: /compare/render/
+        - link "blitz.cloud vs. Railway" [ref=f3e252] [cursor=pointer]:
+          - /url: /compare/railway/
+        - link "blitz.cloud vs. Vercel" [ref=f3e253] [cursor=pointer]:
+          - /url: /compare/vercel/
+        - link "blitz.cloud vs. Fly.io" [ref=f3e254] [cursor=pointer]:
+          - /url: /compare/fly-io/
+        - link "EU alternatives" [ref=f3e255] [cursor=pointer]:
+          - /url: /compare/eu-paas-alternatives/
+      - navigation "Company" [ref=f3e256]:
+        - heading "Company" [level=2] [ref=f3e257]
+        - link "About" [ref=f3e258] [cursor=pointer]:
+          - /url: /about/
+        - link "Contact" [ref=f3e259] [cursor=pointer]:
+          - /url: /contact/
+        - link "Privacy" [ref=f3e260] [cursor=pointer]:
+          - /url: /privacy/
+        - link "Cookie policy" [ref=f3e261] [cursor=pointer]:
+          - /url: /cookies/
+        - link "Imprint" [ref=f3e262] [cursor=pointer]:
+          - /url: /imprint/
+        - link "Terms" [ref=f3e263] [cursor=pointer]:
+          - /url: /terms/
+        - link "Right of withdrawal" [ref=f3e264] [cursor=pointer]:
+          - /url: /withdrawal/
+        - link "Cancel your contract" [ref=f3e265] [cursor=pointer]:
+          - /url: /cancel/

@@ -1,8 +1,8 @@
-# Two containers visiting each other's blitz.cloud app.
+# Two management consoles for local smoke testing.
 #
-# Local smoke test only: the same image is what you push to Docker Hub and
-# deploy twice on blitz.cloud. For a real deployment set the environment
-# variables in the blitz dashboard instead of this file.
+# Targets are intentionally not configured here. Open /admin on each service
+# and add the URL that should be kept awake. For a real deployment, configure
+# the required secrets and persistent paths in the Blitz dashboard.
 services:
   peer-a:
     build: .
@@ -13,8 +13,6 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
-      BLITZ_URL: https://app-b.bob.blitz.cloud
-      EXPECT_TEXT: ""
       INTERVAL_MIN: 20
       JITTER_MIN: 2
       PORT: 8080
@@ -41,8 +39,6 @@ services:
     security_opt:
       - no-new-privileges:true
     environment:
-      BLITZ_URL: https://app-a.alice.blitz.cloud
-      EXPECT_TEXT: ""
       INTERVAL_MIN: 20
       JITTER_MIN: 2
       PORT: 8080

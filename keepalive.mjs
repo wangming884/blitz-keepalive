@@ -1269,8 +1269,13 @@ function normalizeManagedRecord(raw, globals, index, knownIds) {
 
 function loadConfig() {
   const args = parseArgs(process.argv.slice(2));
-  const configPath = args.config ?? process.env.CONFIG_FILE;
-  const urlArg = args.url ?? process.env.BLITZ_URL;
+  // Target URLs are added through the management console and persisted in
+  // managed-targets.json. CLI --url/--config remain available for local and
+  // one-off automation, but are intentionally not read from environment
+  // variables so a container can start with zero targets and no target-address
+  // environment variable.
+  const configPath = args.config;
+  const urlArg = args.url;
   const port = toNumber(args.port ?? process.env.PORT, 'port', { min: 0, max: 65535 }) ?? 0;
   const bindHost = String(args['bind-host'] ?? process.env.BIND_HOST ?? '127.0.0.1').trim();
   if (!bindHost) throw new Error('BIND_HOST must not be empty.');

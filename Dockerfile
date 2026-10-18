@@ -27,8 +27,11 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY keepalive.mjs ./
+COPY keepalive.mjs /app/keepalive.mjs
 COPY public ./public
+# Fail the image build, rather than the cloud runtime, if the source entrypoint
+# was not included in the build context.
+RUN test -s /app/keepalive.mjs && test -s /app/public/index.html
 RUN mkdir -p /app/logs /app/data && chown -R pwuser:pwuser /app
 
 # Let blitz detect the writable state directories as persistent volumes.
@@ -40,4 +43,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "keepalive.mjs"]
+CMD ["node", "/app/keepalive.mjs"]

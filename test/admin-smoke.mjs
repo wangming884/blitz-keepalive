@@ -210,6 +210,12 @@ async function main() {
   const appPort = await getFreePort();
   const baseUrl = `http://127.0.0.1:${appPort}`;
   const fakeUrl = `http://127.0.0.1:${fakePort}/`;
+  // Regression coverage: legacy target environment variables must not create
+  // targets or require a config file. The management console is the source.
+  const legacyTargetEnv = {
+    ['BLITZ' + '_URL']: fakeUrl,
+    ['CONFIG' + '_FILE']: path.join(tempDir, 'legacy-targets.json'),
+  };
   let fake = null;
   let keepalive = null;
   const isolatedInstances = [];
@@ -255,6 +261,7 @@ async function main() {
       ADMIN_PASSWORD: PASSWORD,
       TARGET_URL_ALLOWLIST: '127.0.0.1',
       TARGET_URL_ALLOW_PRIVATE: 'true',
+      ...legacyTargetEnv,
     });
     await waitForHttp(`${baseUrl}/healthz`, [200], 15_000);
 
@@ -349,6 +356,8 @@ async function main() {
     assert.equal(changedSessionOverview.response.status, 200);
     assert.equal(changedSessionOverview.data.config.bindHost, '127.0.0.1');
     assert.equal(changedSessionOverview.data.config.requireHttps, false);
+    assert.equal(changedSessionOverview.data.targets.length, 0);
+    assert.equal(changedSessionOverview.data.summary.totalTargets, 0);
 
     const passwordFileText = await readFile(adminPasswordFile, 'utf8');
     assert.equal(JSON.parse(passwordFileText).algorithm, 'scrypt');
@@ -530,6 +539,7 @@ async function main() {
       ADMIN_PASSWORD: PASSWORD,
       TARGET_URL_ALLOWLIST: '127.0.0.1',
       TARGET_URL_ALLOW_PRIVATE: 'true',
+      ...legacyTargetEnv,
     });
     await waitForHttp(`${baseUrl}/healthz`, [200], 15_000);
     cookie = await login(baseUrl, NEW_PASSWORD);
@@ -689,6 +699,7 @@ async function main() {
           'password-change-invalidates-old-sessions',
           'password-change-rotates-login-secret',
           'restart-uses-persisted-password',
+          'legacy-target-env-ignored-and-zero-target-start',
           'managed-target-create',
           'target-login-password-encrypted-at-rest',
           'target-login-password-not-exposed',
