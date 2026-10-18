@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -295,6 +295,7 @@ async function main() {
     assert.match(adminHtml, /登录管理控制台/);
     assert.match(adminHtml, /安全设置/);
     assert.match(adminHtml, /修改管理密码/);
+    assert.match(adminHtml, /清空日志/);
     assert.match(adminHtml, /业务就绪/);
     assert.equal((await fetch(`${baseUrl}/assets/app.js`)).status, 200);
     assert.equal((await fetch(`${baseUrl}/assets/styles.css`)).status, 200);
@@ -314,6 +315,8 @@ async function main() {
 
     const anonymous = await request(baseUrl, '/api/overview');
     assert.equal(anonymous.response.status, 401);
+    const anonymousLogClear = await request(baseUrl, '/api/logs', { method: 'DELETE' });
+    assert.equal(anonymousLogClear.response.status, 401);
     const queryTokenIgnored = await request(baseUrl, '/api/overview?token=legacy-token');
     assert.equal(queryTokenIgnored.response.status, 401);
 
@@ -632,6 +635,34 @@ async function main() {
     const emptyPersisted = JSON.parse(await readFile(managedTargetsFile, 'utf8'));
     assert.deepEqual(emptyPersisted.targets, []);
 
+    const rotatedLogFile = path.join(logDir, 'keepalive.log.1');
+    await writeFile(rotatedLogFile, '{"event":"rotated-old-event"}\n', 'utf8');
+    const logsBeforeClear = await request(baseUrl, '/api/logs?limit=200', { cookie });
+    assert.equal(logsBeforeClear.response.status, 200, JSON.stringify(logsBeforeClear.data));
+    assert.ok(logsBeforeClear.data.logs.length > 0);
+
+    const clearedLogs = await request(baseUrl, '/api/logs', { method: 'DELETE', cookie });
+    assert.equal(clearedLogs.response.status, 200, JSON.stringify(clearedLogs.data));
+    assert.ok(Number(clearedLogs.data.clearedEntries) > 0);
+
+    const logsAfterClear = await request(baseUrl, '/api/logs?limit=200', { cookie });
+    assert.equal(logsAfterClear.response.status, 200, JSON.stringify(logsAfterClear.data));
+    assert.equal(logsAfterClear.data.logs.length, 1, JSON.stringify(logsAfterClear.data.logs));
+    assert.equal(logsAfterClear.data.logs[0].event, 'logs-cleared');
+    assert.equal(logsAfterClear.data.logs[0].client, '127.0.0.1');
+    assert.equal(logsAfterClear.data.logs[0].via, 'session');
+    assert.ok(Number(logsAfterClear.data.logs[0].clearedEntries) > 0);
+    await assert.rejects(
+      readFile(rotatedLogFile, 'utf8'),
+      (error) => error?.code === 'ENOENT',
+    );
+    const clearedDiskEntries = (await readFile(path.join(logDir, 'keepalive.log'), 'utf8'))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.equal(clearedDiskEntries.length, 1, JSON.stringify(clearedDiskEntries));
+    assert.equal(clearedDiskEntries[0].event, 'logs-cleared');
+
     const loggedOut = await request(baseUrl, '/api/logout', { method: 'POST', cookie });
     assert.equal(loggedOut.response.status, 200);
     const oldSession = await request(baseUrl, '/api/overview', { cookie });
@@ -674,6 +705,11 @@ async function main() {
     assert.equal(tokenSession.data.authenticated, false);
     assert.equal(tokenSession.data.readAuthorized, true);
     assert.equal(tokenSession.data.via, 'token');
+    const tokenLogClear = await request(tokenInstance.baseUrl, '/api/logs', {
+      method: 'DELETE',
+      headers: tokenHeaders,
+    });
+    assert.equal(tokenLogClear.response.status, 401, JSON.stringify(tokenLogClear.data));
     const tokenWrite = await request(tokenInstance.baseUrl, '/api/targets', {
       method: 'POST',
       headers: tokenHeaders,
@@ -758,6 +794,8 @@ async function main() {
           'target-login-password-conflict-rejected',
           'target-login-password-clear',
           'managed-target-delete',
+          'admin-log-clear',
+          'status-token-cannot-clear-logs',
           'logout-invalidates-session',
           'login-rate-limit',
           'login-rate-limit-audit-context',

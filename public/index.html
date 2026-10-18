@@ -200,7 +200,12 @@
                 <p class="eyebrow">活动</p>
                 <h2 id="activity-title">最近事件</h2>
               </div>
-              <span class="panel-hint" id="activity-count">0 条</span>
+              <div class="panel-heading-actions">
+                <span class="panel-hint" id="activity-count">0 条</span>
+                <button class="button button-danger button-small" id="clear-logs-button" type="button" disabled>
+                  清空日志
+                </button>
+              </div>
             </div>
             <div class="activity-list" id="activity-list">
               <div class="empty-state">暂无事件</div>
@@ -240,6 +245,43 @@
             <label for="target-account">账号备注</label>
             <input id="target-account" name="account" type="text" maxlength="100" placeholder="例如 alice">
             <small>仅用于管理端区分，不会用于登录。</small>
+          </div>
+          <div class="field field-wide">
+            <label for="target-proxy-mode">网络代理</label>
+            <select id="target-proxy-mode" name="proxyMode">
+              <option value="inherit">继承全局代理</option>
+              <option value="direct">直连，不使用代理</option>
+              <option value="custom">指定独立代理</option>
+            </select>
+            <small>每个目标可以使用不同代理；全局未配置代理时，“继承”等同于直连。</small>
+          </div>
+          <div class="field field-wide proxy-fields" id="target-proxy-fields" hidden>
+            <div class="form-grid">
+              <div class="field field-wide">
+                <label for="target-proxy">代理地址 <span aria-hidden="true">*</span></label>
+                <input id="target-proxy" name="proxy" type="text" maxlength="2048" placeholder="http://proxy:8080 或 socks5://proxy:1080">
+                <small>支持 http://、https://、socks4://、socks5://、socks5h://；不要在地址中填写账号密码。</small>
+              </div>
+              <div class="field">
+                <label for="target-proxy-username">代理用户名</label>
+                <input id="target-proxy-username" name="proxyUsername" type="text" maxlength="256" autocomplete="username" placeholder="可选">
+                <small>HTTP(S) 代理 Basic 认证；SOCKS 不支持认证。</small>
+              </div>
+              <div class="field">
+                <label for="target-proxy-password">代理密码</label>
+                <input id="target-proxy-password" name="proxyPassword" type="password" maxlength="512" autocomplete="new-password" placeholder="可选">
+                <small id="target-proxy-password-hint">填写后加密保存；留空表示无认证。</small>
+                <label class="checkbox-row" id="target-clear-proxy-password-wrap" hidden>
+                  <input id="target-clear-proxy-password" type="checkbox">
+                  <span>清除已保存的代理密码</span>
+                </label>
+              </div>
+              <div class="field field-wide">
+                <label for="target-proxy-bypass">代理绕过列表</label>
+                <input id="target-proxy-bypass" name="proxyBypass" type="text" maxlength="2048" placeholder="例如 localhost,127.0.0.1,.internal.example.com">
+                <small>可选，多个主机用逗号、分号或空格分隔。</small>
+              </div>
+            </div>
           </div>
           <div class="field field-wide">
             <label for="target-login-password">后台访问密码</label>

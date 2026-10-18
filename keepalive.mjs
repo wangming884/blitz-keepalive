@@ -37,6 +37,7 @@ import {
   rename,
   stat,
   statfs,
+  truncate,
   unlink,
 } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
@@ -79,6 +80,10 @@ const TARGET_SECRET_TAG_BYTES = 16;
 const TARGET_SECRET_RECORD_VERSION = 1;
 const TARGET_SECRET_ALGORITHM = 'aes-256-gcm';
 const TARGET_LOGIN_PASSWORD_MAX_LENGTH = 512;
+const TARGET_PROXY_URL_MAX_LENGTH = 2048;
+const TARGET_PROXY_USERNAME_MAX_LENGTH = 256;
+const TARGET_PROXY_PASSWORD_MAX_LENGTH = 512;
+const TARGET_PROXY_BYPASS_MAX_LENGTH = 2048;
 const LOGIN_WINDOW_MS = 10 * MINUTE;
 const LOGIN_LOCK_MS = 5 * MINUTE;
 const LOGIN_MAX_FAILURES = 5;
@@ -533,6 +538,10 @@ function targetPasswordAad(targetId) {
   return Buffer.from(`blitz-keepalive:target-password:${targetId}`, 'utf8');
 }
 
+function targetProxyPasswordAad(targetId) {
+  return Buffer.from(`blitz-keepalive:target-proxy-password:${targetId}`, 'utf8');
+}
+
 function validateEncryptedTargetPassword(value, label) {
   if (
     value === null ||
@@ -585,8 +594,43 @@ function decryptTargetPassword(secretStore, targetId, value, label = 'encrypted 
   }
 }
 
+function encryptTargetProxyPassword(secretStore, targetId, password) {
+  if (!secretStore) throw new Error('Target proxy password encryption is not initialized.');
+  const iv = randomBytes(TARGET_SECRET_IV_BYTES);
+  const cipher = createCipheriv(TARGET_SECRET_ALGORITHM, secretStore.key, iv);
+  cipher.setAAD(targetProxyPasswordAad(targetId));
+  const data = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
+  return {
+    version: TARGET_SECRET_RECORD_VERSION,
+    algorithm: TARGET_SECRET_ALGORITHM,
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    data: data.toString('base64'),
+  };
+}
+
+function decryptTargetProxyPassword(
+  secretStore,
+  targetId,
+  value,
+  label = 'encrypted proxy password',
+) {
+  if (!secretStore) throw new Error('Target proxy password encryption is not initialized.');
+  const { iv, tag, data } = validateEncryptedTargetPassword(value, label);
+  try {
+    const decipher = createDecipheriv(TARGET_SECRET_ALGORITHM, secretStore.key, iv);
+    decipher.setAAD(targetProxyPasswordAad(targetId));
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+  } catch {
+    throw new Error(`目标 ${targetId} 的代理密码无法解密，请检查密钥文件是否与目标数据匹配。`);
+  }
+}
+
 async function initializeTargetSecretStore(cfg) {
-  const hasEncryptedPasswords = cfg.managedRecords.some((record) => record.loginPasswordEnc);
+  const hasEncryptedPasswords = cfg.managedRecords.some(
+    (record) => record.loginPasswordEnc || record.proxyPasswordEnc,
+  );
   let key = cfg.targetSecretKey ? decodeTargetSecretKey(cfg.targetSecretKey) : null;
 
   if (!key) {
@@ -595,7 +639,7 @@ async function initializeTargetSecretStore(cfg) {
   if (!key) {
     if (hasEncryptedPasswords) {
       throw new Error(
-        `目标数据包含加密访问密码，但密钥文件不存在：${cfg.targetSecretKeyFile}。请恢复备份的密钥文件，或通过 TARGET_SECRET_KEY 提供原密钥。`,
+        `目标数据包含加密访问密码或代理密码，但密钥文件不存在：${cfg.targetSecretKeyFile}。请恢复备份的密钥文件，或通过 TARGET_SECRET_KEY 提供原密钥。`,
       );
     }
     const candidate = randomBytes(TARGET_SECRET_KEY_BYTES);
@@ -621,28 +665,49 @@ async function initializeTargetSecretStore(cfg) {
     decrypt(targetId, value, label) {
       return decryptTargetPassword(this, targetId, value, label);
     },
+    encryptProxy(targetId, password) {
+      return encryptTargetProxyPassword(this, targetId, password);
+    },
+    decryptProxy(targetId, value, label) {
+      return decryptTargetProxyPassword(this, targetId, value, label);
+    },
   };
 }
 
 function hydrateManagedTargetPasswords(cfg, secretStore) {
   for (const record of cfg.managedRecords) {
-    if (!record.loginPasswordEnc) continue;
     const target = cfg.targets.find((item) => item.id === record.id);
     if (!target) continue;
-    target.loginPassword = secretStore.decrypt(
-      record.id,
-      record.loginPasswordEnc,
-      `managedTargets.${record.id}.loginPasswordEnc`,
-    );
-    target.loginPasswordConfigured = true;
+    if (record.loginPasswordEnc) {
+      target.loginPassword = secretStore.decrypt(
+        record.id,
+        record.loginPasswordEnc,
+        `managedTargets.${record.id}.loginPasswordEnc`,
+      );
+      target.loginPasswordConfigured = true;
+    }
+    if (record.proxyPasswordEnc) {
+      if (target.proxyMode !== 'custom' || !target.proxy) {
+        throw new Error(
+          `managedTargets.${record.id}.proxyPasswordEnc requires a custom proxy configuration.`,
+        );
+      }
+      target.proxy.password = secretStore.decryptProxy(
+        record.id,
+        record.proxyPasswordEnc,
+        `managedTargets.${record.id}.proxyPasswordEnc`,
+      );
+      target.proxyPasswordConfigured = true;
+    }
   }
 }
 
 function publicManagedTargetRecord(record) {
-  const { loginPasswordEnc, ...safe } = record;
+  const { loginPasswordEnc, proxyPasswordEnc, ...safe } = record;
   return {
     ...safe,
     loginPasswordConfigured: Boolean(loginPasswordEnc),
+    proxyPasswordConfigured: Boolean(proxyPasswordEnc),
   };
 }
 
@@ -850,6 +915,9 @@ function redactUrlForError(value) {
 function normalizeProxy(raw, label, { username, password, bypass } = {}) {
   if (raw === undefined || raw === null || String(raw).trim() === '') return null;
   const value = String(raw).trim();
+  if (value.length > TARGET_PROXY_URL_MAX_LENGTH) {
+    throw new Error(`${label} must not exceed ${TARGET_PROXY_URL_MAX_LENGTH} characters.`);
+  }
   let url;
   try {
     url = new URL(value.includes('://') ? value : `http://${value}`);
@@ -877,6 +945,16 @@ function normalizeProxy(raw, label, { username, password, bypass } = {}) {
     password !== undefined && password !== null && String(password) !== ''
       ? String(password)
       : decodeUserInfo(url.password);
+  if (user.length > TARGET_PROXY_USERNAME_MAX_LENGTH) {
+    throw new Error(`${label} username must not exceed ${TARGET_PROXY_USERNAME_MAX_LENGTH} characters.`);
+  }
+  if (pass.length > TARGET_PROXY_PASSWORD_MAX_LENGTH) {
+    throw new Error(`${label} password must not exceed ${TARGET_PROXY_PASSWORD_MAX_LENGTH} characters.`);
+  }
+  const normalizedBypass = normalizeBypass(bypass);
+  if (normalizedBypass.length > TARGET_PROXY_BYPASS_MAX_LENGTH) {
+    throw new Error(`${label} bypass list must not exceed ${TARGET_PROXY_BYPASS_MAX_LENGTH} characters.`);
+  }
   if ((protocol === 'socks4:' || protocol === 'socks5:') && (user || pass)) {
     throw new Error(
       `${label}: Chromium does not support SOCKS authentication. ` +
@@ -888,7 +966,7 @@ function normalizeProxy(raw, label, { username, password, bypass } = {}) {
     server: `${protocol}//${url.hostname}:${port}`,
     username: user || '',
     password: pass || '',
-    bypass: normalizeBypass(bypass),
+    bypass: normalizedBypass,
   };
 }
 
@@ -898,9 +976,31 @@ function normalizeProxy(raw, label, { username, password, bypass } = {}) {
  * may still override credentials or the bypass list.
  */
 function resolveTargetProxy(raw, globals, index) {
-  const hasValue = (key) => raw[key] !== undefined && raw[key] !== null && String(raw[key]) !== '';
-  if (Object.prototype.hasOwnProperty.call(raw, 'proxy')) {
-    return normalizeProxy(raw.proxy, `targets[${index}].proxy`, {
+  const hasValue = (key) => raw[key] !== undefined && raw[key] !== null && String(raw[key]) !== "";
+  const hasExplicitProxy = Object.prototype.hasOwnProperty.call(raw, "proxy");
+  if (raw.proxyMode === "direct") {
+    if (hasExplicitProxy && String(raw.proxy).trim() !== "") {
+      throw new Error("targets[" + index + "].proxy must be empty when proxyMode is direct.");
+    }
+    return null;
+  }
+  if (raw.proxyMode === "custom") {
+    if (!hasExplicitProxy || String(raw.proxy).trim() === "") {
+      throw new Error("targets[" + index + "].proxy is required when proxyMode is custom.");
+    }
+    const proxy = normalizeProxy(raw.proxy, "targets[" + index + "].proxy", {
+      username: raw.proxyUsername,
+      password: raw.proxyPassword,
+      bypass: raw.proxyBypass,
+    });
+    if (!proxy) throw new Error("targets[" + index + "].proxy is required when proxyMode is custom.");
+    return proxy;
+  }
+  if (raw.proxyMode === "inherit" && hasExplicitProxy && String(raw.proxy).trim() !== "") {
+    throw new Error("targets[" + index + "].proxy must be empty when proxyMode is inherit.");
+  }
+  if (hasExplicitProxy && raw.proxyMode !== "inherit") {
+    return normalizeProxy(raw.proxy, "targets[" + index + "].proxy", {
       username: raw.proxyUsername,
       password: raw.proxyPassword,
       bypass: raw.proxyBypass,
@@ -909,10 +1009,19 @@ function resolveTargetProxy(raw, globals, index) {
   if (!globals.proxy) return null;
   return {
     ...globals.proxy,
-    username: hasValue('proxyUsername') ? String(raw.proxyUsername) : globals.proxy.username,
-    password: hasValue('proxyPassword') ? String(raw.proxyPassword) : globals.proxy.password,
-    bypass: hasValue('proxyBypass') ? normalizeBypass(raw.proxyBypass) : globals.proxy.bypass,
+    username: hasValue("proxyUsername") ? String(raw.proxyUsername) : globals.proxy.username,
+    password: hasValue("proxyPassword") ? String(raw.proxyPassword) : globals.proxy.password,
+    bypass: hasValue("proxyBypass") ? normalizeBypass(raw.proxyBypass) : globals.proxy.bypass,
   };
+}
+
+const TARGET_PROXY_MODES = new Set(['inherit', 'direct', 'custom']);
+
+function managedRecordProxyMode(record) {
+  if (!record) return 'inherit';
+  if (TARGET_PROXY_MODES.has(record.proxyMode)) return record.proxyMode;
+  if (!Object.prototype.hasOwnProperty.call(record, 'proxy')) return 'inherit';
+  return String(record.proxy).trim() === '' ? 'direct' : 'custom';
 }
 
 /** Never let credentials reach logs, status output or error messages. */
@@ -983,6 +1092,16 @@ function normalizeTarget(raw, globals, index) {
       `targets[${index}].loginSuccessSelector must not exceed ${TARGET_LOGIN_SUCCESS_SELECTOR_MAX_LENGTH} characters.`,
     );
   }
+  if (raw.proxyMode !== undefined && (typeof raw.proxyMode !== "string" || !TARGET_PROXY_MODES.has(raw.proxyMode))) {
+    throw new Error("targets[" + index + "].proxyMode must be inherit, direct or custom.");
+  }
+  const proxyMode = TARGET_PROXY_MODES.has(raw.proxyMode)
+    ? raw.proxyMode
+    : Object.prototype.hasOwnProperty.call(raw, 'proxy')
+      ? String(raw.proxy).trim() === ''
+        ? 'direct'
+        : 'custom'
+      : 'inherit';
 
   return {
     id,
@@ -1014,6 +1133,12 @@ function normalizeTarget(raw, globals, index) {
     loginPassword: null,
     loginPasswordConfigured: false,
     notReadyPatterns: globals.notReadyPatterns.slice(),
+    proxyMode,
+    proxyUsername:
+      raw.proxyUsername === undefined || raw.proxyUsername === null
+        ? ''
+        : String(raw.proxyUsername),
+    proxyPasswordConfigured: Boolean(raw.proxyPassword),
     proxy: resolveTargetProxy(raw, globals, index),
     nextDue: 0,
     consecutiveFailures: 0,
@@ -1183,6 +1308,132 @@ function buildManagedTarget(
     throw new Error('managedTargets records must not contain plaintext loginPassword.');
   }
 
+  const sourceRecord = existing ?? persistedRecord;
+  if (
+    raw.proxyMode !== undefined &&
+    (typeof raw.proxyMode !== 'string' || !TARGET_PROXY_MODES.has(raw.proxyMode))
+  ) {
+    throw new HttpError(400, '代理模式必须是 inherit、direct 或 custom。');
+  }
+  for (const field of ['proxy', 'proxyUsername', 'proxyPassword', 'proxyBypass']) {
+    if (raw[field] !== undefined && typeof raw[field] !== 'string') {
+      throw new HttpError(400, `代理字段 ${field} 必须是字符串。`);
+    }
+  }
+  if (raw.clearProxyPassword !== undefined && typeof raw.clearProxyPassword !== 'boolean') {
+    throw new HttpError(400, '清除代理密码标记必须是布尔值。');
+  }
+  if (raw.proxy && raw.proxy.trim().length > TARGET_PROXY_URL_MAX_LENGTH) {
+    throw new HttpError(400, `代理地址不能超过 ${TARGET_PROXY_URL_MAX_LENGTH} 个字符。`);
+  }
+  if (raw.proxyUsername && raw.proxyUsername.length > TARGET_PROXY_USERNAME_MAX_LENGTH) {
+    throw new HttpError(400, `代理用户名不能超过 ${TARGET_PROXY_USERNAME_MAX_LENGTH} 个字符。`);
+  }
+  if (raw.proxyPassword && raw.proxyPassword.length > TARGET_PROXY_PASSWORD_MAX_LENGTH) {
+    throw new HttpError(400, `代理密码不能超过 ${TARGET_PROXY_PASSWORD_MAX_LENGTH} 个字符。`);
+  }
+  if (raw.proxyBypass && raw.proxyBypass.length > TARGET_PROXY_BYPASS_MAX_LENGTH) {
+    throw new HttpError(400, `代理绕过列表不能超过 ${TARGET_PROXY_BYPASS_MAX_LENGTH} 个字符。`);
+  }
+  if (raw.proxyPassword && raw.clearProxyPassword) {
+    throw new HttpError(400, '不能同时设置和清除代理密码。');
+  }
+  if (raw.clearProxyPassword && !sourceRecord?.proxyPasswordEnc) {
+    throw new HttpError(400, '该目标没有可清除的代理密码。');
+  }
+  if (raw.proxyPasswordEnc !== undefined && !persistedRecord) {
+    throw new HttpError(400, '不能直接提交加密后的代理密码。');
+  }
+  if (persistedRecord && raw.proxyPassword !== undefined) {
+    throw new Error('managedTargets records must not contain plaintext proxyPassword.');
+  }
+
+  let proxyMode;
+  if (raw.proxyMode !== undefined) {
+    proxyMode = raw.proxyMode;
+  } else if (raw.proxy !== undefined) {
+    proxyMode = raw.proxy.trim() === '' ? 'direct' : 'custom';
+  } else {
+    proxyMode = existing ? managedRecordProxyMode(existing) : 'inherit';
+  }
+
+  let proxy = null;
+  let proxyPasswordEnc = null;
+  if (proxyMode === 'custom') {
+    const proxyValue = raw.proxy ?? existing?.proxy ?? '';
+    if (typeof proxyValue !== 'string' || !proxyValue.trim()) {
+      throw new HttpError(400, '指定代理时必须填写代理地址。');
+    }
+    const reuseExistingProxyFields = raw.proxy === undefined && Boolean(existing);
+    const proxyUsername =
+      raw.proxyUsername ?? (reuseExistingProxyFields ? existing.proxyUsername ?? '' : '');
+    const proxyBypass =
+      raw.proxyBypass ?? (reuseExistingProxyFields ? existing.proxyBypass ?? '' : '');
+    try {
+      proxy = normalizeProxy(proxyValue, 'proxy', {
+        username: proxyUsername,
+        password: raw.proxyPassword,
+        bypass: proxyBypass,
+      });
+    } catch (error) {
+      throw new HttpError(400, error.message);
+    }
+    if (!proxy) throw new HttpError(400, '指定代理时必须填写代理地址。');
+    if (proxy.password && !proxy.username) {
+      throw new HttpError(400, '配置代理密码时必须同时填写代理用户名。');
+    }
+    if (proxy.password && raw.clearProxyPassword) {
+      throw new HttpError(400, '不能同时设置和清除代理密码。');
+    }
+
+    if (proxy.password) {
+      if (!secretStore) throw new HttpError(500, '代理密码加密服务尚未初始化。');
+      proxyPasswordEnc = secretStore.encryptProxy(id, proxy.password);
+    } else if (!raw.clearProxyPassword && sourceRecord?.proxyPasswordEnc) {
+      let sameProxyIdentity = false;
+      if (sourceRecord.proxy) {
+        try {
+          const previous = normalizeProxy(sourceRecord.proxy, 'stored proxy', {
+            username: sourceRecord.proxyUsername,
+            bypass: sourceRecord.proxyBypass,
+          });
+          sameProxyIdentity =
+            Boolean(previous) &&
+            previous.server === proxy.server &&
+            previous.username === proxy.username;
+        } catch (error) {
+          throw new Error(
+            `managedTargets.${id}.proxy is invalid: ${error.message}`,
+          );
+        }
+      }
+      if (sameProxyIdentity) {
+        proxyPasswordEnc = sourceRecord.proxyPasswordEnc;
+        if (secretStore) {
+          proxy.password = secretStore.decryptProxy(
+            id,
+            proxyPasswordEnc,
+            `managedTargets.${id}.proxyPasswordEnc`,
+          );
+        } else {
+          validateEncryptedTargetPassword(
+            proxyPasswordEnc,
+            `managedTargets.${id}.proxyPasswordEnc`,
+          );
+        }
+      }
+    }
+  } else if (raw.proxy !== undefined && raw.proxy.trim() !== '') {
+    throw new HttpError(400, '继承全局代理或直连时不能同时填写代理地址。');
+  } else if (
+    (raw.proxyUsername && raw.proxyUsername.trim()) ||
+    raw.proxyPassword ||
+    (raw.proxyBypass && raw.proxyBypass.trim()) ||
+    raw.clearProxyPassword
+  ) {
+    throw new HttpError(400, '只有指定代理模式才能配置代理凭据或绕过列表。');
+  }
+
   let target;
   try {
     target = normalizeTarget(
@@ -1194,6 +1445,17 @@ function buildManagedTarget(
         expect,
         account,
         loginSuccessSelector,
+        proxyMode,
+        ...(proxyMode === 'custom'
+          ? {
+              proxy: proxy.server,
+              proxyUsername: proxy.username,
+              proxyPassword: proxy.password,
+              proxyBypass: proxy.bypass,
+            }
+          : proxyMode === 'direct'
+            ? { proxy: '' }
+            : {}),
       },
       globals,
       index,
@@ -1230,6 +1492,9 @@ function buildManagedTarget(
     );
   }
   target.loginPasswordConfigured = Boolean(loginPasswordEnc);
+  target.proxyMode = proxyMode;
+  target.proxyUsername = proxy?.username ?? '';
+  target.proxyPasswordConfigured = Boolean(proxyPasswordEnc);
   if (target.loginPasswordConfigured && !target.expectText && !target.loginSuccessSelector) {
     throw new HttpError(400, '配置后台访问密码时，必须同时设置期望文本或登录成功选择器。');
   }
@@ -1244,6 +1509,17 @@ function buildManagedTarget(
       : {}),
     ...(target.account ? { account: target.account } : {}),
     ...(loginPasswordEnc ? { loginPasswordEnc } : {}),
+    proxyMode,
+    ...(proxyMode === 'custom'
+      ? {
+          proxy: proxy.server,
+          ...(proxy.username ? { proxyUsername: proxy.username } : {}),
+          ...(proxy.bypass ? { proxyBypass: proxy.bypass } : {}),
+        }
+      : proxyMode === 'direct'
+        ? { proxy: '' }
+        : {}),
+    ...(proxyPasswordEnc ? { proxyPasswordEnc } : {}),
     createdAt: target.managedCreatedAt,
     updatedAt: target.managedUpdatedAt,
   };
@@ -1572,6 +1848,27 @@ function createLogger(cfg) {
   };
   log.snapshot = (limit = 50) =>
     recent.slice(-Math.min(Math.max(Number(limit) || 50, 1), MAX_RECENT_LOGS));
+  log.clear = async () => {
+    // Remove only entries present when clear() was called. Logs queued after
+    // the request remain visible and are appended after the files are reset.
+    const entriesToClear = new Set(recent);
+    const operation = writeQueue.then(async () => {
+      for (let index = recent.length - 1; index >= 0; index -= 1) {
+        if (entriesToClear.has(recent[index])) recent.splice(index, 1);
+      }
+      await truncate(cfg.logFile, 0).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+      await unlink(`${cfg.logFile}.1`).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+    });
+    writeQueue = operation.catch((error) => {
+      console.error(`failed to clear log: ${error.message}`);
+    });
+    await operation;
+    return entriesToClear.size;
+  };
   return log;
 }
 
@@ -1988,6 +2285,9 @@ async function visitOnce(cfg, target) {
     // them. They are supplied per page through page.authenticate().
     args.push(`--proxy-server=${target.proxy.server}`);
     if (target.proxy.bypass) args.push(`--proxy-bypass-list=${target.proxy.bypass}`);
+  } else {
+    // direct and inherit-without-global-proxy must not fall back to system/env proxy.
+    args.push('--no-proxy-server');
   }
 
   const browser = await puppeteer.launch({
@@ -2627,6 +2927,10 @@ function publicTargetRuntime(target) {
     running: Boolean(target.running),
     overdue: readinessIssues.includes('schedule-overdue'),
     readinessIssues,
+    proxyMode: target.proxyMode ?? (target.proxy ? 'custom' : 'direct'),
+    proxyUsername: target.proxyUsername || null,
+    proxyBypass: target.proxy?.bypass || null,
+    proxyPasswordConfigured: Boolean(target.proxyPasswordConfigured),
     proxy: redactProxy(target.proxy),
   };
 }
@@ -2806,19 +3110,26 @@ function createTargetManager(cfg, status, controls) {
     await writeManagedTargetsFile(cfg.managedTargetsFile, records);
     cfg.managedRecords = records;
   };
-  const exportRecord = (record) => ({
-    id: record.id,
-    url: record.url,
-    intervalMin: record.intervalMin,
-    jitterMin: record.jitterMin,
-    expect: record.expect,
-    ...(record.loginSuccessSelector
-      ? { loginSuccessSelector: record.loginSuccessSelector }
-      : {}),
-    ...(record.account ? { account: record.account } : {}),
-    ...(record.createdAt ? { createdAt: record.createdAt } : {}),
-    ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
-  });
+  const exportRecord = (record) => {
+    const proxyMode = managedRecordProxyMode(record);
+    return {
+      id: record.id,
+      url: record.url,
+      intervalMin: record.intervalMin,
+      jitterMin: record.jitterMin,
+      expect: record.expect,
+      ...(record.loginSuccessSelector
+        ? { loginSuccessSelector: record.loginSuccessSelector }
+        : {}),
+      ...(record.account ? { account: record.account } : {}),
+      proxyMode,
+      ...(record.proxy !== undefined ? { proxy: record.proxy } : {}),
+      ...(record.proxyUsername ? { proxyUsername: record.proxyUsername } : {}),
+      ...(record.proxyBypass ? { proxyBypass: record.proxyBypass } : {}),
+      ...(record.createdAt ? { createdAt: record.createdAt } : {}),
+      ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
+    };
+  };
 
   return {
     create(raw) {
@@ -2955,7 +3266,14 @@ function createTargetManager(cfg, status, controls) {
           throw new HttpError(409, `网页管理目标最多允许 ${MAX_MANAGED_TARGETS} 个。`);
         }
 
-        const sensitiveFields = ['loginPassword', 'loginPasswordEnc', 'clearLoginPassword'];
+        const sensitiveFields = [
+          'loginPassword',
+          'loginPasswordEnc',
+          'clearLoginPassword',
+          'proxyPassword',
+          'proxyPasswordEnc',
+          'clearProxyPassword',
+        ];
         raw.targets.forEach((item, index) => {
           if (item === null || typeof item !== 'object' || Array.isArray(item)) {
             throw new HttpError(400, `导入目标 ${index + 1} 必须是对象。`);
@@ -2978,9 +3296,7 @@ function createTargetManager(cfg, status, controls) {
           const item = raw.targets[index];
           const existingRecord =
             typeof item.id === 'string' ? existingRecords.get(item.id.trim()) : null;
-          const persistedRecord = existingRecord?.loginPasswordEnc
-            ? { ...item, loginPasswordEnc: existingRecord.loginPasswordEnc }
-            : null;
+          const persistedRecord = existingRecord ?? null;
           const { target, record } = buildManagedTarget(
             item,
             null,
@@ -2997,6 +3313,17 @@ function createTargetManager(cfg, status, controls) {
               `managedTargets.${target.id}.loginPasswordEnc`,
             );
             target.loginPasswordConfigured = true;
+          }
+          if (existingRecord?.proxyPasswordEnc && record.proxyPasswordEnc) {
+            if (target.proxyMode !== 'custom' || !target.proxy) {
+              throw new Error('Imported proxy password requires a custom proxy configuration.');
+            }
+            target.proxy.password = cfg.targetSecrets.decryptProxy(
+              target.id,
+              record.proxyPasswordEnc,
+              `managedTargets.${target.id}.proxyPasswordEnc`,
+            );
+            target.proxyPasswordConfigured = true;
           }
           await validateTargetUrl(target.url, cfg);
           knownIds.add(target.id);
@@ -3063,6 +3390,10 @@ async function buildOverview(cfg, status, log, controls, admin) {
       readinessIssues,
       locked: Boolean(target.managementLocked || target.schedulerQueued),
       pendingRun: controls.hasPending(target.id),
+      proxyMode: target.proxyMode ?? (target.proxy ? 'custom' : 'direct'),
+      proxyUsername: target.proxyUsername || null,
+      proxyBypass: target.proxy?.bypass || null,
+      proxyPasswordConfigured: Boolean(target.proxyPasswordConfigured),
       proxy: redactProxy(target.proxy),
     };
   });
@@ -3457,19 +3788,36 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
   }
 
   if (pathname === '/api/logs') {
-    if (req.method !== 'GET') {
-      sendText(res, 405, 'method not allowed');
+    if (req.method === 'GET') {
+      if (!requireReadAuth()) return;
+      const requestedLimit = Number(searchParams.get('limit') ?? 50);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 200)
+        : 50;
+      sendJson(res, 200, {
+        generatedAt: new Date().toISOString(),
+        logs: log.snapshot(limit).map(publicLogEntry),
+      });
       return;
     }
-    if (!requireReadAuth()) return;
-    const requestedLimit = Number(searchParams.get('limit') ?? 50);
-    const limit = Number.isFinite(requestedLimit)
-      ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 200)
-      : 50;
-    sendJson(res, 200, {
-      generatedAt: new Date().toISOString(),
-      logs: log.snapshot(limit).map(publicLogEntry),
-    });
+    if (req.method === 'DELETE') {
+      const authentication = requireAdminAuth();
+      if (!authentication) return;
+      const clearedEntries = await log.clear();
+      await log({
+        level: 'info',
+        event: 'logs-cleared',
+        client: getClientIp(cfg, req),
+        via: authentication.via,
+        clearedEntries,
+      });
+      sendJson(res, 200, {
+        message: '事件日志已清空。',
+        clearedEntries,
+      });
+      return;
+    }
+    sendText(res, 405, 'method not allowed');
     return;
   }
 

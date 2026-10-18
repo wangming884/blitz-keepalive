@@ -11,9 +11,11 @@ const state = {
   passwordChangeAvailable: false,
   loading: false,
   saving: false,
+  clearingLogs: false,
   changingPassword: false,
   editingTargetId: null,
   editingTargetPasswordConfigured: false,
+  editingTargetProxyPasswordConfigured: false,
   targetSearch: '',
   targetFilter: 'all',
   lastRenderedTargets: [],
@@ -66,12 +68,22 @@ const elements = {
   targetsList: document.getElementById('targets-list'),
   activityList: document.getElementById('activity-list'),
   activityCount: document.getElementById('activity-count'),
+  clearLogsButton: document.getElementById('clear-logs-button'),
   targetDialog: document.getElementById('target-dialog'),
   targetForm: document.getElementById('target-form'),
   targetDialogTitle: document.getElementById('target-dialog-title'),
   targetUrl: document.getElementById('target-url'),
   targetId: document.getElementById('target-id'),
   targetAccount: document.getElementById('target-account'),
+  targetProxyMode: document.getElementById('target-proxy-mode'),
+  targetProxyFields: document.getElementById('target-proxy-fields'),
+  targetProxy: document.getElementById('target-proxy'),
+  targetProxyUsername: document.getElementById('target-proxy-username'),
+  targetProxyPassword: document.getElementById('target-proxy-password'),
+  targetProxyPasswordHint: document.getElementById('target-proxy-password-hint'),
+  targetClearProxyPasswordWrap: document.getElementById('target-clear-proxy-password-wrap'),
+  targetClearProxyPassword: document.getElementById('target-clear-proxy-password'),
+  targetProxyBypass: document.getElementById('target-proxy-bypass'),
   targetLoginPassword: document.getElementById('target-login-password'),
   targetLoginPasswordHint: document.getElementById('target-login-password-hint'),
   targetClearPasswordWrap: document.getElementById('target-clear-password-wrap'),
@@ -116,6 +128,7 @@ const eventLabels = {
   'target-auto-paused': '自动暂停目标',
   'scheduled-paused': '跳过暂停目标',
   'targets-imported': '导入目标',
+  'logs-cleared': '清空日志',
 };
 
 function apiHeaders(json = false) {
@@ -507,7 +520,7 @@ function createTargetCard(target) {
     target.expectConfigured || target.loginSuccessSelector ? '已配置' : '未配置',
   );
   appendFact(facts, '访问密码', target.loginPasswordConfigured ? '已配置' : '未配置');
-  appendFact(facts, '网络', formatProxy(target.proxy));
+  appendFact(facts, '网络', formatProxy(target));
   appendFact(facts, '连续失败', String(target.consecutiveFailures ?? 0));
   appendFact(facts, '认证失败', String(target.authFailureCount ?? 0));
 
@@ -591,6 +604,7 @@ function safeHttpUrl(value) {
 
 function renderLogs(logs) {
   setText(elements.activityCount, `${logs.length} 条`);
+  elements.clearLogsButton.disabled = state.clearingLogs || logs.length === 0;
   if (logs.length === 0) {
     elements.activityList.replaceChildren(createEmptyState('暂无事件记录。'));
     return;
@@ -651,6 +665,7 @@ function formatLogDetail(entry) {
     }
   }
   if (entry.artifacts) pieces.push('已保存失败现场');
+  if (entry.clearedEntries !== undefined) pieces.push(`清理 ${entry.clearedEntries} 条`);
   if (entry.detail) pieces.push(entry.detail);
   return pieces.join(' · ') || '无附加信息';
 }
@@ -667,8 +682,16 @@ function formatReason(raw) {
   return value.length > 140 ? `${value.slice(0, 137)}...` : value || '未知结果';
 }
 
-function formatProxy(proxy) {
-  if (!proxy) return '直连';
+function formatProxy(target) {
+  const mode = target.proxyMode || (target.proxy ? 'custom' : 'direct');
+  const proxy = target.proxy;
+  if (mode === 'direct') return '直连';
+  if (mode === 'inherit') {
+    return proxy
+      ? `继承全局 · ${proxy.server || '代理'}${proxy.auth ? ' · 认证' : ''}`
+      : '继承全局（当前直连）';
+  }
+  if (!proxy) return '指定代理未生效';
   return `${proxy.server || '代理'}${proxy.auth ? ' · 认证' : ''}`;
 }
 
@@ -728,9 +751,31 @@ function createEmptyState(message) {
   return element;
 }
 
+function updateTargetProxyFields() {
+  const custom = elements.targetProxyMode.value === 'custom';
+  elements.targetProxyFields.hidden = !custom;
+  if (!custom) {
+    elements.targetClearProxyPassword.checked = false;
+    elements.targetProxyPassword.disabled = false;
+    return;
+  }
+  const clear = elements.targetClearProxyPassword.checked;
+  elements.targetProxyPassword.disabled = clear;
+  elements.targetClearProxyPasswordWrap.hidden =
+    !state.editingTargetId || !state.editingTargetProxyPasswordConfigured;
+  if (!state.editingTargetId) {
+    elements.targetProxyPasswordHint.textContent = '填写后加密保存；留空表示无认证。';
+  } else if (state.editingTargetProxyPasswordConfigured) {
+    elements.targetProxyPasswordHint.textContent = '已配置；未修改代理地址或用户名时留空可保留，修改后需重新输入。';
+  } else {
+    elements.targetProxyPasswordHint.textContent = '尚未配置代理密码；填写后加密保存。';
+  }
+}
+
 function openTargetDialog(target = null) {
   state.editingTargetId = target?.id || null;
   state.editingTargetPasswordConfigured = Boolean(target?.loginPasswordConfigured);
+  state.editingTargetProxyPasswordConfigured = Boolean(target?.proxyPasswordConfigured);
   elements.targetForm.reset();
   elements.targetFormError.hidden = true;
   elements.targetFormError.textContent = '';
@@ -740,6 +785,16 @@ function openTargetDialog(target = null) {
   elements.targetUrl.value = target?.url || '';
   elements.targetId.value = target?.id || '';
   elements.targetAccount.value = target?.account || '';
+  const proxyMode = ['inherit', 'direct', 'custom'].includes(target?.proxyMode)
+    ? target.proxyMode
+    : 'inherit';
+  elements.targetProxyMode.value = proxyMode;
+  elements.targetProxy.value = proxyMode === 'custom' ? target?.proxy?.server || '' : '';
+  elements.targetProxyUsername.value = target?.proxyUsername || '';
+  elements.targetProxyPassword.value = '';
+  elements.targetProxyPassword.disabled = false;
+  elements.targetClearProxyPassword.checked = false;
+  elements.targetProxyBypass.value = target?.proxyBypass || target?.proxy?.bypass || '';
   elements.targetInterval.value = String(target?.intervalMin ?? 20);
   elements.targetJitter.value = String(target?.jitterMin ?? 2);
   elements.targetExpect.value = target?.expect || '';
@@ -756,14 +811,19 @@ function openTargetDialog(target = null) {
   } else {
     elements.targetLoginPasswordHint.textContent = '尚未配置，填写后巡检会自动登录目标后台。';
   }
+  updateTargetProxyFields();
   elements.targetDialog.showModal();
   window.requestAnimationFrame(() => elements.targetUrl.focus());
 }
 
 function closeTargetDialog() {
   state.editingTargetPasswordConfigured = false;
+  state.editingTargetProxyPasswordConfigured = false;
   elements.targetLoginPassword.value = '';
   elements.targetLoginPassword.disabled = false;
+  elements.targetProxyPassword.value = '';
+  elements.targetProxyPassword.disabled = false;
+  elements.targetClearProxyPassword.checked = false;
   if (elements.targetDialog.open) elements.targetDialog.close();
 }
 
@@ -888,6 +948,49 @@ function validateTargetPayload(payload) {
   if (payload.loginPassword && payload.clearLoginPassword) {
     return '不能同时设置和清除后台访问密码。';
   }
+  if (!['inherit', 'direct', 'custom'].includes(payload.proxyMode)) {
+    return '请选择有效的网络代理模式。';
+  }
+  if (payload.proxyMode !== 'custom') {
+    if (payload.proxy || payload.proxyUsername || payload.proxyPassword || payload.proxyBypass) {
+      return '只有指定代理模式才能配置代理参数。';
+    }
+    if (payload.clearProxyPassword) return '只有指定代理模式才能清除代理密码。';
+    return null;
+  }
+  if (!payload.proxy) return '指定代理时必须填写代理地址。';
+  if (payload.proxy.length > 2048) return '代理地址不能超过 2048 个字符。';
+  if (payload.proxyUsername.length > 256) return '代理用户名不能超过 256 个字符。';
+  if (payload.proxyPassword !== undefined && payload.proxyPassword.length > 512) {
+    return '代理密码不能超过 512 个字符。';
+  }
+  if (payload.proxyBypass.length > 2048) return '代理绕过列表不能超过 2048 个字符。';
+  if (payload.proxyPassword && !payload.proxyUsername) {
+    return '配置代理密码时必须同时填写代理用户名。';
+  }
+  if (payload.proxyPassword && payload.clearProxyPassword) {
+    return '不能同时设置和清除代理密码。';
+  }
+
+  let proxyUrl;
+  try {
+    proxyUrl = new URL(
+      /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(payload.proxy)
+        ? payload.proxy
+        : `http://${payload.proxy}`,
+    );
+  } catch {
+    return '请输入有效的代理地址。';
+  }
+  if (!['http:', 'https:', 'socks4:', 'socks5:', 'socks5h:'].includes(proxyUrl.protocol)) {
+    return '代理地址仅支持 HTTP、HTTPS、SOCKS4、SOCKS5 或 SOCKS5H。';
+  }
+  if (
+    ['socks4:', 'socks5:', 'socks5h:'].includes(proxyUrl.protocol) &&
+    (payload.proxyUsername || payload.proxyPassword)
+  ) {
+    return 'SOCKS 代理不支持用户名或密码认证。';
+  }
   return null;
 }
 
@@ -903,7 +1006,20 @@ async function submitTargetForm(event) {
     jitterMin: Number(elements.targetJitter.value),
     expect: elements.targetExpect.value.trim(),
     loginSuccessSelector: elements.targetLoginSuccessSelector.value.trim(),
+    proxyMode: elements.targetProxyMode.value,
   };
+  if (payload.proxyMode === 'custom') {
+    payload.proxy = elements.targetProxy.value.trim();
+    payload.proxyUsername = elements.targetProxyUsername.value.trim();
+    payload.proxyBypass = elements.targetProxyBypass.value.trim();
+    const proxyPassword = elements.targetProxyPassword.value;
+    if (proxyPassword) payload.proxyPassword = proxyPassword;
+    if (state.editingTargetId && elements.targetClearProxyPassword.checked) {
+      payload.clearProxyPassword = true;
+    }
+  } else if (payload.proxyMode === 'direct') {
+    payload.proxy = '';
+  }
   const loginPassword = elements.targetLoginPassword.value;
   if (loginPassword) payload.loginPassword = loginPassword;
   if (state.editingTargetId && elements.targetClearPassword.checked) {
@@ -925,6 +1041,12 @@ async function submitTargetForm(event) {
   if (
     payload.clearLoginPassword &&
     !window.confirm('确定清除该目标已保存的后台访问密码吗？')
+  ) {
+    return;
+  }
+  if (
+    payload.clearProxyPassword &&
+    !window.confirm('确定清除该目标已保存的代理密码吗？')
   ) {
     return;
   }
@@ -1053,7 +1175,7 @@ async function exportTargets() {
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1_000);
-    showToast('目标配置已导出。导出文件不包含访问密码。');
+    showToast('目标配置已导出。导出文件不包含后台访问密码和代理密码。');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     showToast(`导出失败：${message}`, 'error');
@@ -1177,6 +1299,40 @@ async function login(event) {
   }
 }
 
+async function clearLogs() {
+  if (state.clearingLogs) return;
+  if (!window.confirm('确定清空事件日志吗？失败现场不会被删除。')) return;
+
+  state.clearingLogs = true;
+  elements.clearLogsButton.disabled = true;
+  elements.clearLogsButton.textContent = '清空中…';
+  try {
+    const response = await fetch('/api/logs', {
+      method: 'DELETE',
+      headers: apiHeaders(),
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+    const data = await readJson(response);
+    if (response.status === 401) {
+      showLogin('登录已过期，请重新输入访问密码。', { clearPassword: true });
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || `服务返回 HTTP ${response.status}`);
+
+    showToast(data.message || `已清空 ${data.clearedEntries ?? 0} 条事件日志。`);
+    await loadOverview();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast(`清空日志失败：${message}`, 'error');
+  } finally {
+    state.clearingLogs = false;
+    elements.clearLogsButton.textContent = '清空日志';
+    const logs = Array.isArray(state.data?.logs) ? state.data.logs : [];
+    elements.clearLogsButton.disabled = logs.length === 0;
+  }
+}
+
 async function logout() {
   elements.logoutButton.disabled = true;
   try {
@@ -1217,6 +1373,7 @@ function bindEvents() {
   elements.addTargetButton.addEventListener('click', () => openTargetDialog());
   elements.addTargetSecondary.addEventListener('click', () => openTargetDialog());
   elements.securityButton.addEventListener('click', openPasswordDialog);
+  elements.clearLogsButton.addEventListener('click', clearLogs);
   elements.logoutButton.addEventListener('click', logout);
   elements.targetSearch.addEventListener('input', () => {
     state.targetSearch = elements.targetSearch.value;
@@ -1241,6 +1398,12 @@ function bindEvents() {
   elements.authForm.addEventListener('submit', login);
   elements.passwordForm.addEventListener('submit', submitPasswordForm);
   elements.targetForm.addEventListener('submit', submitTargetForm);
+  elements.targetProxyMode.addEventListener('change', updateTargetProxyFields);
+  elements.targetClearProxyPassword.addEventListener('change', () => {
+    if (elements.targetClearProxyPassword.checked) elements.targetProxyPassword.value = '';
+    elements.targetProxyPassword.disabled = elements.targetClearProxyPassword.checked;
+    updateTargetProxyFields();
+  });
   elements.targetClearPassword.addEventListener('change', () => {
     if (elements.targetClearPassword.checked) elements.targetLoginPassword.value = '';
     elements.targetLoginPassword.disabled = elements.targetClearPassword.checked;
@@ -1254,6 +1417,9 @@ function bindEvents() {
     elements.targetLoginPassword.value = '';
     elements.targetLoginPassword.disabled = false;
     elements.targetClearPassword.checked = false;
+    elements.targetProxyPassword.value = '';
+    elements.targetProxyPassword.disabled = false;
+    elements.targetClearProxyPassword.checked = false;
   });
   elements.passwordCancel.addEventListener('click', closePasswordDialog);
   elements.passwordCancelX.addEventListener('click', closePasswordDialog);

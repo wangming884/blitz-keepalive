@@ -132,8 +132,8 @@ targets.json
 - 目标已经处于登录态、页面没有密码框时不会报错，仍按正常页面校验继续访问。
 - 静态 `config.json` / `--url` 目标不支持此字段；只有 `/admin` 创建或编辑的网页目标支持。
 - 编辑时密码留空表示保留原密码；勾选“清除已保存的访问密码”才会删除。不能在同一次请求中同时设置和清除。
-- 密码使用 AES-256-GCM 加密，目标 ID 作为 AAD。密钥来自 `TARGET_SECRET_KEY`，或自动生成到 `TARGET_SECRET_KEY_FILE`（默认 `data/target-secrets.key`，权限 `0600`）。必须把密钥文件与 `managed-targets.json` 一起备份；密钥丢失后已保存的目标密码无法恢复，服务会拒绝启动而不是静默跳过。
-- API 只返回 `loginPasswordConfigured` 布尔值，不返回明文、密文或密钥；失败现场写盘前也会清除所有 frame 中的密码框内容。
+- 目标后台访问密码和网页目标代理密码都使用 AES-256-GCM 加密，目标 ID 作为 AAD。密钥来自 `TARGET_SECRET_KEY`，或自动生成到 `TARGET_SECRET_KEY_FILE`（默认 `data/target-secrets.key`，权限 `0600`）。必须把密钥文件与 `managed-targets.json` 一起备份；密钥丢失后已保存的密码无法恢复，服务会拒绝启动而不是静默跳过。
+- API 只返回 `loginPasswordConfigured` / `proxyPasswordConfigured` 布尔值，不返回明文、密文或密钥；失败现场写盘前也会清除所有 frame 中的密码框内容。
 
 > 多目标模式下请把 `.env` 里的 `INTERVAL_MIN` / `JITTER_MIN` **留空**（安装脚本会自动清空），否则这个全局值会覆盖 JSON 里的 `defaults`。需要全局统一调整时再显式填写或传 `--interval-min`。
 
@@ -153,9 +153,41 @@ targets.json
 
 ## 5. 网络代理（HTTP / HTTPS / SOCKS）
 
-服务器必须经代理出网，或需要给不同账号使用不同出口 IP 时使用。
+服务器必须经代理出网，或需要给不同账号使用不同出口 IP 时使用。全局代理只是“继承”模式的默认值；每个网页目标可以独立选择继承、直连或自己的代理。
 
-### 5.1 全局代理
+### 5.1 三种模式
+
+| 模式 | 行为 |
+| --- | --- |
+| `inherit` | 继承全局代理；全局未配置时直连。不会回退到操作系统或进程环境中的代理设置。 |
+| `direct` | 强制直连，使用 Chromium `--no-proxy-server`，即使全局代理已配置也不会使用。 |
+| `custom` | 该目标使用独立代理；不会继承全局代理的地址或凭据。 |
+
+管理后台的“网络代理”区域支持：
+
+- 代理地址：`http://`、`https://`、`socks4://`、`socks5://`、`socks5h://`。
+- HTTP(S) 代理用户名和密码：密码通过 `page.authenticate()` 提供，不会写入 Chromium 命令行。
+- 代理绕过列表：逗号、分号或空格分隔；管理端会转换成 Chromium 需要的分号格式。
+- 编辑目标时密码留空表示保留原密码；勾选“清除已保存的代理密码”才会删除。
+- 代理地址或用户名改变后，旧密码不再复用，必须重新输入；避免把 A 代理的密码发给 B 代理。
+
+静态配置仍可使用旧字段；推荐同时写 `proxyMode`：
+
+```json
+{
+  "defaults": { "proxy": "http://proxy.example.com:8080" },
+  "targets": [
+    { "id": "alice-blog", "url": "https://blog.alice.blitz.cloud", "proxyMode": "inherit" },
+    { "id": "bob-uptime", "url": "https://uptime.bob.blitz.cloud", "proxyMode": "custom",
+      "proxy": "socks5://10.0.0.5:1080" },
+    { "id": "internal", "url": "https://internal.example.com", "proxyMode": "direct", "proxy": "" }
+  ]
+}
+```
+
+静态配置中的代理密码会以明文存在于配置文件中，应限制文件权限；网页管理目标使用 AES-256-GCM 加密保存代理密码。SOCKS 代理不支持用户名或密码认证，需要代理侧按 IP 放行。
+
+### 5.2 全局代理
 
 ```bash
 # HTTP 代理 + Basic 认证：密码走环境变量，避免出现在进程列表
@@ -170,29 +202,11 @@ node keepalive.mjs --config=targets.json
 node keepalive.mjs --config=targets.json --proxy=socks5://127.0.0.1:1080
 ```
 
-支持的 scheme：`http://`、`https://`、`socks4://`、`socks5://`、`socks5h://`（`socks5h` 等价于 `socks5`，DNS 都在代理侧解析）。省略端口时用默认值：HTTP 80、HTTPS 443、SOCKS 1080。
-
-### 5.2 每个目标单独配置
-
-```json
-{
-  "defaults": { "proxy": "http://proxy.example.com:8080" },
-  "targets": [
-    { "id": "alice-blog", "url": "https://blog.alice.blitz.cloud", "expect": "Alice" },
-    { "id": "bob-uptime", "url": "https://uptime.bob.blitz.cloud", "expect": "Uptime Kuma",
-      "proxy": "socks5://10.0.0.5:1080" },
-    { "id": "internal", "url": "https://internal.example.com", "proxy": "" }
-  ]
-}
-```
-
-- 目标未写 `proxy` → 继承全局代理；可以只覆盖 `proxyUsername` / `proxyPassword` / `proxyBypass`。
-- `proxy: ""` → 该目标直连，即使全局配置了代理。
-- 目标显式写 `proxy` 时只使用该代理自己的凭据，不会继承全局凭据，避免把 A 账号的密码发给 B 代理。
+省略端口时使用默认值：HTTP 80、HTTPS 443、SOCKS 1080。`socks5h` 等价于 `socks5`，DNS 在代理侧解析。
 
 ### 5.3 不走代理的地址
 
-`PROXY_BYPASS`（或标准环境变量 `NO_PROXY`）支持逗号、分号、空格分隔，会自动转换成 Chromium 的 bypass 列表；`PROXY_BYPASS` 优先于 `NO_PROXY`：
+`PROXY_BYPASS`（或标准环境变量 `NO_PROXY`）是全局默认绕过列表；目标级 `proxyBypass` 可以覆盖它。两者都支持逗号、分号、空格分隔，并会自动转换成 Chromium 的 bypass 列表；`PROXY_BYPASS` 优先于 `NO_PROXY`：
 
 ```bash
 export NO_PROXY="localhost,127.0.0.1,.internal.example.com"
@@ -208,13 +222,20 @@ export NO_PROXY="localhost,127.0.0.1,.internal.example.com"
 | SOCKS 认证 | **不支持**（Chromium 限制）；配置了用户名/密码会直接报配置错误，退出码 2 |
 | DNS | HTTP 代理由代理解析目标域名；SOCKS5 默认远程解析（socks5h 语义） |
 | CONNECT | HTTPS 目标经 HTTP 代理时使用 CONNECT，代理必须允许 CONNECT 到 443 |
-| 日志脱敏 | 日志与 `/status` 只输出 `server` 和 `auth: true/false`，不输出用户名、密码 |
-| 进程可见性 | `--proxy-pass` 会出现在进程列表，优先用 `PROXY_PASSWORD` |
+| 日志脱敏 | 日志、`/status`、管理 API 和导出不输出代理密码、密文或密钥；管理端为了编辑会返回代理用户名，日志中不记录用户名 |
+| 代理密码落盘 | 网页目标密码使用 AES-256-GCM 加密，密钥来自 `TARGET_SECRET_KEY` 或 `data/target-secrets.key` |
 | 失败提示 | 代理不可达 → `proxy-unreachable:ERR_PROXY_CONNECTION_FAILED`；认证被拒 → `proxy-auth-rejected`（HTTP 407，立即失败，不空等唤醒页） |
 
-Chrome 仍可能经代理发出少量后台请求（组件更新、GCM 等），不影响保活，但会出现在代理日志里。
+Chrome 仍可能经代理发出少量后台请求（组件更新、GCM 等），不影响保活，但会出现在代理日志里。代理服务商看到的出口 IP 取决于代理配置，本项目不能保证匿名性。
 
-### 5.5 Docker
+### 5.5 导入、导出与备份
+
+- `/api/targets/export` 包含 `proxyMode`、代理地址、用户名和绕过列表，但不包含代理密码、密文或密钥。
+- 导入接口拒绝 `proxyPassword`、`proxyPasswordEnc`、`clearProxyPassword` 等敏感字段；相同目标 ID 且代理地址、用户名不变时，会保留已有的加密密码。
+- `managed-targets.json` 与 `target-secrets.key` 必须一起备份。只恢复目标文件而丢失密钥，已保存的目标密码和代理密码都无法解密。
+- 代理凭据仍属于敏感信息；不要把明文密码写入 Git、日志或公开的导出文件。
+
+### 5.6 Docker
 
 镜像无需改动，部署时加环境变量：
 
@@ -296,7 +317,7 @@ node keepalive.mjs --config=config.json --once
 node keepalive.mjs --port=8090 --admin-password="换成足够长的随机密码"
 ```
 
-打开 `http://127.0.0.1:8090/admin`，登录后可以添加、编辑、删除网页目标，为单个目标配置后台访问密码，并查看下一次执行时间、最近巡检结果和进程日志。目标默认保存在 `data/managed-targets.json`；新增目标约 1 秒后会进行首次巡检。登录后点击“安全设置”可以修改管理密码，修改成功后其他旧会话会立即失效。
+打开 `http://127.0.0.1:8090/admin`，登录后可以添加、编辑、删除网页目标，为单个目标配置后台访问密码和独立网络代理，并查看下一次执行时间、最近巡检结果和进程日志。目标默认保存在 `data/managed-targets.json`；新增目标约 1 秒后会进行首次巡检。登录后点击“安全设置”可以修改管理密码，修改成功后其他旧会话会立即失效。
 
 网页修改的管理密码以 scrypt 哈希保存到 `data/admin-auth.json`，不会保存明文。该文件存在时优先于 `ADMIN_PASSWORD`，因此重启后仍使用网页中设置的新密码；如需重新以环境变量初始化，请先删除或更换密码文件。目标后台访问密码则使用独立的 AES-256-GCM 密钥文件加密，需与目标数据一起持久化和备份。
 
@@ -748,6 +769,7 @@ sudo certbot renew --dry-run
 16. **脱敏**：日志中未出现代理用户名、密码或 `user:pass@` 形式。
 17. **NO_PROXY**：环境变量 `NO_PROXY=127.0.0.1,localhost,::1` 被自动转换为 bypass 列表并生效。
 18. **Nginx 生产链路**：临时启动应用与 Nginx 容器，直连 `/admin` 返回 `426`，经 Nginx 的 `/healthz` 和 `/admin` 均返回 `200`，登录响应包含 `Secure` Cookie；配置通过 `nginx -t`。
+19. **清空日志**：匿名和 `STATUS_TOKEN` 调用均返回 `401`；管理员清空后内存与磁盘只保留一条 `logs-cleared` 审计事件，轮转文件被删除，失败现场不受影响。
 
 未验证项：真实 blitz.cloud 应用（需要你的地址）；Linux/systemd 路径（当前环境为 Windows）；容器在 blitz 的 gVisor 沙箱中的实际内存与启动耗时；「容器访问是否被算作访客」这一关键判定；`https://`（TLS）代理与需要认证的 SOCKS5（Chromium 本身不支持后者）。
 
@@ -762,6 +784,8 @@ sudo certbot renew --dry-run
 - `reason`：`ready` / `not-ready:<pattern>` / `expect-text-missing` / `empty-page` / 网络错误信息。
 - `event`：`start` / `visit` / `scheduled` / `summary` / `shutdown`。
 - 日志超过 5 MB 自动轮转为 `keepalive.log.1`。
+- 管理端“清空日志”会清空内存中的最近事件、`keepalive.log` 和 `keepalive.log.1`，并保留一条 `logs-cleared` 审计事件记录清理数量。
+- 清空日志不会删除 `logs/failures/` 下的失败现场；`STATUS_TOKEN` 只读，无权调用清空接口。
 - 建议每天扫一次 `"ok":false`，按 `target` 聚合；连续失败通常意味着页面文案变了、目标被暂停，或 Chrome 升级出问题。
 
 ### 10.1 管理网页
@@ -782,7 +806,7 @@ http://127.0.0.1:8090/admin
 - 为网页管理目标设置、替换或清除后台访问密码；页面只显示“已配置/未配置”，不会回显密码。
 - 暂停或恢复单个目标。暂停原因、截止时间和下一次执行时间会写入 `runtime-state.json`，重启后继续保持；连续 3 次认证失败会自动暂停 30 分钟。
 - 导入、导出网页管理目标。导入为完整替换，最多 100 个目标、请求体最大 128 KB；拒绝密码等敏感字段，同 ID 导入会保留原密码密文。
-- 查看最近 40 条进程事件和访问结果。
+- 查看最近 40 条进程事件和访问结果，并可二次确认后清空事件日志（保留失败现场）。
 - 对全部目标或单个目标触发一次立即巡检；请求会进入内存队列，不会修改配置文件。
 - 每 10 秒自动刷新，也可手动刷新。
 
@@ -806,6 +830,7 @@ POST   /api/logout                  # 销毁当前会话
 PUT    /api/password                # 修改管理密码并轮换当前会话
 GET    /api/overview                # 总览、目标、最近日志
 GET    /api/logs?limit=50           # 最近日志（1..200）
+DELETE /api/logs                    # 清空事件日志，仅管理员会话可用
 GET    /status                      # 只读状态（需会话或 STATUS_TOKEN）
 GET    /metrics                     # Prometheus 文本指标（需会话或 STATUS_TOKEN）
 GET    /api/targets/export          # 导出网页管理目标（不含密码材料）
@@ -819,9 +844,11 @@ POST   /api/targets/<id>/resume     # 恢复调度
 POST   /api/targets/import          # 完整替换网页管理目标
 ```
 
-目标对象中的 `loginPassword` 用于设置或替换目标后台访问密码；`clearLoginPassword: true` 用于清除。响应和总览只包含 `loginPasswordConfigured`，不包含任何密码材料。
+目标对象中的 `loginPassword` 用于设置或替换目标后台访问密码；`clearLoginPassword: true` 用于清除。代理相关字段为 `proxyMode`（`inherit` / `direct` / `custom`）、`proxy`、`proxyUsername`、`proxyPassword`、`proxyBypass`；`clearProxyPassword: true` 用于清除代理密码。响应和总览只包含 `loginPasswordConfigured` / `proxyPasswordConfigured`，不包含任何密码材料。修改代理地址或用户名后，已有代理密码不会自动复用。
 
 浏览器使用登录 Cookie 调用写接口；脚本可使用 `X-Status-Token: <token>` 或 `Authorization: Bearer <token>` 读取只读接口。令牌不会写入 URL，也不会被管理网页读取。
+
+`DELETE /api/logs` 仅允许管理员会话调用；成功后返回清理的内存事件数量，只保留新写入的 `logs-cleared` 审计事件，且不会删除失败现场。
 
 `/metrics` 使用 Prometheus 文本格式，包含进程存活、`blitz_keepalive_ready`、目标数、累计访问/失败、活跃浏览器、排队任务、Node.js RSS 和运行时间。目标级指标包括最近成功时间、连续失败数、下次执行时间、暂停状态和调度超时状态；目标级指标带有目标 ID 标签，必须限制 `/metrics` 的访问范围。未携带会话或 `STATUS_TOKEN` 时返回 `401`；采集器示例：
 
@@ -856,8 +883,8 @@ bash ./deploy/backup.sh --data-dir ./data --output-dir ./backups --passphrase-fi
 
 备份包含：
 
-- `managed-targets.json`：网页目标及加密后的目标密码。
-- `target-secrets.key`：目标密码解密密钥，丢失后已保存密码无法恢复。
+- `managed-targets.json`：网页目标及加密后的目标密码、代理密码。
+- `target-secrets.key`：目标密码和代理密码的解密密钥，丢失后已保存密码无法恢复。
 - `admin-auth.json`：管理密码的 scrypt 哈希。
 - `runtime-state.json`：暂停状态、最近结果和下一次执行时间；文件不存在时仅警告。
 
@@ -909,7 +936,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --managed-targets-file=data/managed-targets.json  网页目标持久化文件
 --runtime-state-file=data/runtime-state.json  暂停、最近结果和下次执行时间持久化文件
 --target-secret-key=...  目标密码加密密钥（32 字节 base64 或 64 位 hex；优先用环境变量）
---target-secret-key-file=data/target-secrets.key  自动生成/读取的目标密码加密密钥文件
+--target-secret-key-file=data/target-secrets.key  自动生成/读取的目标密码与代理密码加密密钥文件
 --status-token=...  只读 API 令牌（不能登录管理台或执行写操作）
 --require-https=true  强制管理台和 API 使用 HTTPS；/healthz 与 /readyz 除外
 --trust-proxy=true  信任可信代理的 X-Forwarded-* 请求头
@@ -921,10 +948,10 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --chrome-no-sandbox=false  仅在已有容器安全边界时启用
 --failure-dump-max-files=100  失败现场最大保留数量
 --failure-dump-max-age-days=7  失败现场最大保留天数
---proxy=...         代理地址：http(s)://、socks4://、socks5://
---proxy-user=...    代理用户名（优先用环境变量）
---proxy-pass=...    代理密码（会出现在进程列表，优先用环境变量）
---proxy-bypass=...  不走代理的地址，逗号/分号分隔
+--proxy=...         全局代理地址：http(s)://、socks4://、socks5://；仅作为 inherit 模式默认值
+--proxy-user=...    全局代理用户名（优先用环境变量）
+--proxy-pass=...    全局代理密码（会出现在进程列表，优先用环境变量）
+--proxy-bypass=...  全局不走代理的地址，逗号/分号分隔
 --log-dir=logs      日志目录
 --lock-file=...     单实例锁路径
 --timeout-sec=60    导航超时
@@ -936,7 +963,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --dump-failures=false  关闭失败现场落盘
 ```
 
-环境变量：`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。
+环境变量：`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。网页目标的代理模式、代理地址、用户名、密码和绕过列表通过管理 API 配置，不需要为每个目标新增环境变量。
 
 备份脚本另外读取 `BACKUP_PASSPHRASE` 或 `BACKUP_PASSPHRASE_FILE`；这两个变量不会被保活进程使用。
 
