@@ -20,6 +20,7 @@ const state = {
   targetFilter: 'all',
   lastRenderedTargets: [],
   targetsSignature: '',
+  consecutiveLoadFailures: 0,
   toastTimer: null,
 };
 
@@ -165,6 +166,10 @@ function apiHeaders(json = false) {
 }
 
 function setConnection(kind, label) {
+  // 轮询每 10 秒跑一次，重复写入同样的值会让顶栏状态反复重绘（视觉上闪动）。
+  if (elements.connection.dataset.state === kind && elements.connectionLabel.textContent === label) {
+    return;
+  }
   elements.connection.dataset.state = kind;
   elements.connectionLabel.textContent = label;
 }
@@ -330,12 +335,25 @@ async function loadOverview({ silent = false } = {}) {
     state.passwordFileExists = Boolean(data.config?.passwordFileExists);
     state.passwordChangeAvailable = Boolean(data.config?.passwordChangeAvailable);
     render(data);
-    showDashboard();
+    state.consecutiveLoadFailures = 0;
+    if (state.authenticated) {
+      // Already on the dashboard: only refresh the connection pill. Calling
+      // showDashboard() again would re-apply every hidden/visible flag on each
+      // 10s poll, which makes the top bar look like it keeps reconnecting.
+      setConnection('online', '已连接');
+    } else {
+      showDashboard();
+    }
     hideError();
   } catch (error) {
     if (error?.name === 'AbortError') return;
     const message = error instanceof Error ? error.message : String(error);
-    setConnection('error', '连接失败');
+    state.consecutiveLoadFailures += 1;
+    // A single failed background poll should not repaint the pill red: with a
+    // flaky proxy the user sees "连接失败 / 已连接" flicker every 10 seconds.
+    if (!silent || state.consecutiveLoadFailures >= 2) {
+      setConnection('error', '连接失败');
+    }
     if (!silent) showError(message);
   } finally {
     if (overviewController === controller) {
@@ -477,6 +495,7 @@ function renderTargets(targets) {
   state.lastRenderedTargets = targets;
   if (targets.length === 0) {
     setText(elements.targetFilterSummary, '暂无保活目标');
+    updateFilterCounts(targets);
     const empty = createEmptyState('还没有保活目标。添加网页地址后，调度器会自动开始访问。');
     const button = document.createElement('button');
     button.className = 'button button-primary button-small';
@@ -489,6 +508,7 @@ function renderTargets(targets) {
   }
 
   const visibleTargets = targets.filter(targetMatchesFilters);
+  updateFilterCounts(targets);
   setText(
     elements.targetFilterSummary,
     visibleTargets.length === targets.length
@@ -496,7 +516,7 @@ function renderTargets(targets) {
       : `显示 ${visibleTargets.length} / ${targets.length} 个目标`,
   );
   if (visibleTargets.length === 0) {
-    const empty = createEmptyState('没有符合当前搜索和筛选条件的目标。');
+    const empty = createEmptyState(emptyFilterMessage(targets));
     const reset = makeActionButton('清除筛选', 'button button-quiet button-small', resetTargetFilters);
     empty.append(reset);
     elements.targetsList.replaceChildren(empty);
@@ -504,8 +524,74 @@ function renderTargets(targets) {
   }
 
   const fragment = document.createDocumentFragment();
-  for (const target of visibleTargets) fragment.append(createTargetCard(target));
+  for (const target of visibleTargets) {
+    // One malformed target must not blank out the whole list: render a
+    // placeholder for it and keep the other cards on screen.
+    try {
+      fragment.append(createTargetCard(target));
+    } catch (error) {
+      console.error('[target-card] 渲染失败', target?.id, error);
+      fragment.append(createTargetErrorCard(target, error));
+    }
+  }
   elements.targetsList.replaceChildren(fragment);
+}
+
+function createTargetErrorCard(target, error) {
+  const card = document.createElement('article');
+  card.className = 'target-card';
+  card.dataset.state = 'failed';
+  const title = document.createElement('h3');
+  title.textContent = target?.id || '未命名目标';
+  const detail = document.createElement('p');
+  detail.className = 'target-reason';
+  detail.textContent = `卡片渲染失败：${error instanceof Error ? error.message : String(error)}`;
+  card.append(title, detail);
+  return card;
+}
+
+function emptyFilterMessage(targets) {
+  const query = state.targetSearch.trim();
+  if (query) return `没有匹配「${query}」的目标。`;
+  if (state.targetFilter !== 'all') {
+    return `当前筛选下没有目标，切换到「全部」可查看全部 ${targets.length} 个目标。`;
+  }
+  return '没有可显示的目标。';
+}
+
+const filterCounters = {
+  all: (targets) => targets.length,
+  healthy: (targets) => targets.filter(targetIsHealthy).length,
+  failing: (targets) => targets.filter(targetHasFailure).length,
+  paused: (targets) => targets.filter((target) => target.paused === true).length,
+  'scheduled-off': (targets) =>
+    targets.filter((target) => !target.paused && target.scheduledOff === true).length,
+  'keep-open': (targets) =>
+    targets.filter((target) => !target.paused && target.keepOpenActive === true).length,
+  waiting: (targets) =>
+    targets.filter(
+      (target) =>
+        !target.paused &&
+        !target.scheduledOff &&
+        !target.lastVisit &&
+        Number(target.consecutiveFailures) === 0,
+    ).length,
+};
+
+function updateFilterCounts(targets) {
+  if (!elements.targetFilters) return;
+  for (const chip of elements.targetFilters.querySelectorAll('[data-filter]')) {
+    const key = chip.dataset.filter || 'all';
+    const counter = filterCounters[key];
+    if (!counter) continue;
+    if (!chip.dataset.label) chip.dataset.label = chip.textContent.trim();
+    const count = counter(targets);
+    const badge = document.createElement('span');
+    badge.className = 'filter-chip-count';
+    badge.textContent = String(count);
+    chip.replaceChildren(document.createTextNode(chip.dataset.label), badge);
+    chip.classList.toggle('is-empty', count === 0);
+  }
 }
 
 function targetMatchesFilters(target) {
@@ -521,6 +607,9 @@ function targetMatchesFilters(target) {
   if (state.targetFilter === 'paused') return target.paused === true;
   if (state.targetFilter === 'keep-open') return !target.paused && target.keepOpenActive === true;
   if (state.targetFilter === 'scheduled-off') return !target.paused && target.scheduledOff === true;
+  // "全部" 必须无条件显示所有目标。暂停和计划关闭的目标同样要出现，
+  // 否则用户会以为目标丢了（自动暂停是最常见的触发路径）。
+  if (state.targetFilter === 'all') return true;
   if (target.paused || target.scheduledOff) return false;
   if (state.targetFilter === 'healthy') return targetIsHealthy(target);
   if (state.targetFilter === 'failing') return targetHasFailure(target);
@@ -752,6 +841,47 @@ function createTargetCard(target) {
   footer.append(reason, actions);
   card.append(head, url, ...(pauseNotice ? [pauseNotice] : keepOpenNotice ? [keepOpenNotice] : scheduleNotice ? [scheduleNotice] : []), facts, footer);
   return card;
+}
+
+const SCHEDULE_DAY_LABELS = {
+  1: '周一',
+  2: '周二',
+  3: '周三',
+  4: '周四',
+  5: '周五',
+  6: '周六',
+  7: '周日',
+};
+
+function formatScheduleDays(days) {
+  const list = Array.isArray(days)
+    ? [...new Set(days.map(Number).filter((day) => Number.isInteger(day) && day >= 1 && day <= 7))].sort(
+        (a, b) => a - b,
+      )
+    : [];
+  if (list.length === 0 || list.length === 7) return '每天';
+  if (list.length === 5 && list.every((day, index) => day === index + 1)) return '工作日';
+  if (list.length === 2 && list[0] === 6 && list[1] === 7) return '周末';
+
+  // Collapse consecutive runs so 1-5 renders as "周一至周五" instead of a list.
+  const ranges = [];
+  let start = list[0];
+  let previous = list[0];
+  for (const day of list.slice(1)) {
+    if (day === previous + 1) {
+      previous = day;
+      continue;
+    }
+    ranges.push([start, previous]);
+    start = day;
+    previous = day;
+  }
+  ranges.push([start, previous]);
+  return ranges
+    .map(([from, to]) =>
+      from === to ? SCHEDULE_DAY_LABELS[from] : `${SCHEDULE_DAY_LABELS[from]}至${SCHEDULE_DAY_LABELS[to]}`,
+    )
+    .join('、');
 }
 
 function formatTargetReadiness(target) {
@@ -1417,18 +1547,23 @@ async function toggleTargetKeepOpen(target, button) {
   }
   button.disabled = true;
   try {
-    const res = await apiFetch(`/api/targets/${encodeURIComponent(target.id)}/keep-open`, {
+    const response = await fetch(`/api/targets/${encodeURIComponent(target.id)}/keep-open`, {
       method: 'POST',
+      headers: apiHeaders(true),
+      credentials: 'same-origin',
       body: JSON.stringify({ action: nextAction }),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.message || '操作失败');
+    const data = await readJson(response);
+    if (response.status === 401) {
+      showLogin('登录已过期，请重新输入管理密码。', { clearPassword: true });
+      return;
     }
-    showToast(nextAction === 'start' ? '已开启长驻挂机保持' : '已停止长驻挂机保持');
-    await loadOverview();
+    if (!response.ok) throw new Error(data.error || `服务返回 HTTP ${response.status}`);
+    showToast(data.message || (nextAction === 'start' ? '已开启长驻挂机保持' : '已停止长驻挂机保持'));
+    await loadOverview({ silent: true });
   } catch (error) {
-    showToast(`操作失败：${error.message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    showToast(`${nextAction === 'start' ? '开启' : '停止'}保持失败：${message}`, 'error');
   } finally {
     button.disabled = false;
   }
@@ -1620,7 +1755,9 @@ async function triggerRun(targetId = null, button = null) {
     }
     if (!response.ok) throw new Error(data.error || `服务返回 HTTP ${response.status}`);
     showToast(data.message || '巡检请求已排队，将在数秒内执行。');
-    window.setTimeout(() => loadOverview({ silent: true }), 700);
+    // 立刻同步一次状态：排队后卡片会变成「巡检中 / 已排队」，
+    // 按钮随之禁用。只等 10 秒轮询会让用户在间隙里重复点击并收到 409。
+    await loadOverview({ silent: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     showToast(`巡检请求失败：${message}`, 'error');

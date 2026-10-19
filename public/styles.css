@@ -1490,6 +1490,9 @@ button:disabled {
 }
 
 .filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-height: 34px;
   padding: 0 12px;
   border: 1px solid transparent;
@@ -1499,6 +1502,25 @@ button:disabled {
   font-size: 0.72rem;
   font-weight: 600;
   transition: border-color 160ms ease, background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.filter-chip-count {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: inherit;
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+.filter-chip.is-empty .filter-chip-count {
+  opacity: 0.4;
+}
+
+.filter-chip.is-active .filter-chip-count {
+  background: rgba(4, 26, 22, 0.22);
 }
 
 .filter-chip:hover {

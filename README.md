@@ -314,6 +314,7 @@ blitz-keepalive/
 ├── notify.mjs                    # webhook 告警（去重 + 静默窗口）
 ├── storage.mjs                   # 原子写 JSON 的共享工具
 ├── scripts/check-syntax.mjs      # 全仓语法检查（npm run check）
+├── scripts/check-frontend.mjs    # 浏览器脚本「调用了未定义函数」检查（npm run check）
 ├── config.example.json           # 多账号 / 多应用配置模板
 ├── .env.example                  # 环境变量模板
 ├── Dockerfile                    # 可部署到 blitz.cloud 的镜像（内置 Chromium + /healthz + /readyz）

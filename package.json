@@ -11,7 +11,7 @@
     "start": "node keepalive.mjs",
     "visit": "node keepalive.mjs --once",
     "fake": "node test/fake-blitz.mjs",
-    "check": "node scripts/check-syntax.mjs",
+    "check": "node scripts/check-syntax.mjs && node scripts/check-frontend.mjs",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "node test/schedule.mjs --unit-only && node test/keepopen.mjs --unit-only",
     "test:integration": "node test/schedule.mjs && node test/keepopen.mjs && node test/readiness.mjs && node test/admin-smoke.mjs && node test/target-proxy.mjs && node test/hardening.mjs && node test/features.mjs"

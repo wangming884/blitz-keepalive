@@ -251,7 +251,7 @@
     </div>
 
     <dialog class="target-dialog" id="target-dialog" aria-labelledby="target-dialog-title">
-      <form class="target-form" id="target-form">
+      <form class="target-form" id="target-form" autocomplete="off">
         <div class="dialog-heading">
           <div>
             <p class="eyebrow">目标配置</p>
@@ -263,12 +263,12 @@
         <div class="form-grid">
           <div class="field field-wide">
             <label for="target-url">网页地址 <span aria-hidden="true">*</span></label>
-            <input id="target-url" name="url" type="url" maxlength="2048" placeholder="https://example.blitz.cloud" required>
+            <input id="target-url" name="url" type="url" maxlength="2048" autocomplete="off" placeholder="https://example.blitz.cloud" required>
             <small>仅支持 http:// 或 https:// 地址。</small>
           </div>
           <div class="field">
             <label for="target-id">目标名称</label>
-            <input id="target-id" name="id" type="text" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" placeholder="留空自动生成">
+            <input id="target-id" name="id" type="text" maxlength="64" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" placeholder="留空自动生成">
             <small>可选，字母、数字、点、下划线、短横线。</small>
           </div>
           <div class="field">
