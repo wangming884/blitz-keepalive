@@ -27,11 +27,17 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
+COPY schedule.mjs /app/schedule.mjs
+COPY keepopen.mjs /app/keepopen.mjs
+COPY urlguard.mjs /app/urlguard.mjs
+COPY storage.mjs /app/storage.mjs
+COPY stats.mjs /app/stats.mjs
+COPY notify.mjs /app/notify.mjs
 COPY keepalive.mjs /app/keepalive.mjs
 COPY public ./public
 # Fail the image build, rather than the cloud runtime, if the source entrypoint
 # was not included in the build context.
-RUN test -s /app/keepalive.mjs && test -s /app/public/index.html
+RUN test -s /app/schedule.mjs && test -s /app/keepopen.mjs && test -s /app/urlguard.mjs && test -s /app/storage.mjs && test -s /app/stats.mjs && test -s /app/notify.mjs && test -s /app/keepalive.mjs && test -s /app/public/index.html && test -s /app/public/status.html
 RUN mkdir -p /app/logs /app/data && chown -R pwuser:pwuser /app
 
 # Let blitz detect the writable state directories as persistent volumes.

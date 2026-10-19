@@ -33,9 +33,13 @@ services:
     environment:
       INTERVAL_MIN: ${INTERVAL_MIN:-20}
       JITTER_MIN: ${JITTER_MIN:-2}
+      SCHEDULE_TIMEZONE: ${SCHEDULE_TIMEZONE:-Asia/Shanghai}
       # This production profile runs exactly one Chromium instance.
       # Change this deliberately only after reviewing memory and scheduling capacity.
       MAX_CONCURRENT: "1"
+      # Each Keep-Open session owns a dedicated Chromium instance. Keep the
+      # default at one and raise it only after sizing memory for all browsers.
+      MAX_KEEP_OPEN_SESSIONS: ${MAX_KEEP_OPEN_SESSIONS:-1}
       SESSION_IDLE_TIMEOUT_MIN: ${SESSION_IDLE_TIMEOUT_MIN:-60}
       PORT: 8090
       BIND_HOST: 0.0.0.0
@@ -43,7 +47,14 @@ services:
       ADMIN_PASSWORD_FILE: /app/data/admin-auth.json
       MANAGED_TARGETS_FILE: /app/data/managed-targets.json
       RUNTIME_STATE_FILE: /app/data/runtime-state.json
+      STATS_FILE: /app/data/stats.json
       TARGET_SECRET_KEY_FILE: /app/data/target-secrets.key
+      PUBLIC_STATUS: ${PUBLIC_STATUS:-false}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_MIN_INTERVAL_SEC: ${WEBHOOK_MIN_INTERVAL_SEC:-900}
+      WEBHOOK_TIMEOUT_SEC: ${WEBHOOK_TIMEOUT_SEC:-10}
+      WEBHOOK_FAILURE_THRESHOLD: ${WEBHOOK_FAILURE_THRESHOLD:-3}
+      BLOCK_RESOURCES: ${BLOCK_RESOURCES:-}
       STATUS_TOKEN: ${STATUS_TOKEN:-}
       REQUIRE_HTTPS: ${REQUIRE_HTTPS:-true}
       TRUST_PROXY: ${TRUST_PROXY:-true}

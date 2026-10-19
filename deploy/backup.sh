@@ -10,6 +10,7 @@ Creates a timestamped tar.gz archive containing:
   target-secrets.key
   admin-auth.json
   runtime-state.json (when present)
+  stats.json (when present)
 
 The archive is AES-256-GCM encrypted by default. The plaintext tar.gz is
 removed after successful encryption unless --allow-plaintext is supplied.
@@ -64,7 +65,7 @@ umask 077
 mkdir -p -- "$output_dir"
 chmod 700 "$output_dir"
 
-required_files=(managed-targets.json target-secrets.key admin-auth.json runtime-state.json)
+required_files=(managed-targets.json target-secrets.key admin-auth.json runtime-state.json stats.json)
 included_files=()
 for name in "${required_files[@]}"; do
   if [[ -f "$data_dir/$name" ]]; then

@@ -182,6 +182,7 @@ function instancePaths(tempDir, label) {
     adminPasswordFile: path.join(directory, 'admin-auth.json'),
     targetSecretKeyFile: path.join(directory, 'target-secrets.key'),
     runtimeStateFile: path.join(directory, 'runtime-state.json'),
+    statsFile: path.join(directory, 'stats.json'),
     logDir: path.join(directory, 'logs'),
     lockFile: path.join(directory, 'keepalive.lock'),
   };
@@ -205,6 +206,7 @@ async function startManagementInstance(
       `--admin-password-file=${paths.adminPasswordFile}`,
       `--target-secret-key-file=${paths.targetSecretKeyFile}`,
       `--runtime-state-file=${paths.runtimeStateFile}`,
+      `--stats-file=${paths.statsFile}`,
       `--log-dir=${paths.logDir}`,
       `--lock-file=${paths.lockFile}`,
       '--interval-min=20',
@@ -479,6 +481,7 @@ async function main() {
       `--managed-targets-file=${path.join(runtimeVersionDir, 'managed.json')}`,
       `--admin-password-file=${path.join(runtimeVersionDir, 'admin.json')}`,
       `--runtime-state-file=${runtimeVersionFile}`,
+      `--stats-file=${path.join(runtimeVersionDir, 'stats.json')}`,
       `--log-dir=${path.join(runtimeVersionDir, 'logs')}`,
       `--lock-file=${path.join(runtimeVersionDir, 'lock')}`,
     ], { ADMIN_PASSWORD: PASSWORD });
@@ -585,6 +588,7 @@ async function main() {
         `--admin-password-file=${path.join(strictDir, 'admin.json')}`,
         `--target-secret-key-file=${path.join(strictDir, 'target-secrets.key')}`,
         `--runtime-state-file=${path.join(strictDir, 'runtime-state.json')}`,
+        `--stats-file=${path.join(strictDir, 'stats.json')}`,
         `--log-dir=${path.join(strictDir, 'logs')}`,
         `--lock-file=${path.join(strictDir, 'lock')}`,
       ];

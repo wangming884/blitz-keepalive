@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Blitz Keepalive · 状态</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <div class="page-shell status-page">
+      <header class="topbar">
+        <a class="brand" href="/status" aria-label="Blitz Keepalive 状态页">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="brand-copy">
+            <strong>Blitz Keepalive</strong>
+            <small>只读状态页</small>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <span class="connection" id="status-connection" data-state="loading">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="status-connection-label">连接中</span>
+          </span>
+          <span class="panel-hint" id="status-updated">--</span>
+        </div>
+      </header>
+
+      <main class="content">
+        <div class="notice notice-error" id="status-error" hidden role="alert">
+          <strong>无法读取状态</strong>
+          <span id="status-error-message"></span>
+        </div>
+
+        <section class="status-hero" id="status-hero" aria-live="polite">
+          <div class="status-orb" aria-hidden="true"></div>
+          <div class="status-copy">
+            <p class="eyebrow">当前状态</p>
+            <h1 id="status-overall">正在加载</h1>
+            <p id="status-detail">正在读取保活状态…</p>
+          </div>
+        </section>
+
+        <section class="metrics" aria-label="运行概况">
+          <article class="metric-card">
+            <span class="metric-label">目标总数</span>
+            <strong id="status-target-count">--</strong>
+            <small>已纳入保活</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">活动目标</span>
+            <strong id="status-active-count">--</strong>
+            <small>处于保活窗口内</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">需关注</span>
+            <strong id="status-issue-count">--</strong>
+            <small>未满足保活窗口</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">挂机保持</span>
+            <strong id="status-keepopen-count">--</strong>
+            <small>长驻访问中</small>
+          </article>
+        </section>
+
+        <section class="panel" aria-labelledby="status-targets-title">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">目标</p>
+              <h2 id="status-targets-title">保活目标</h2>
+            </div>
+            <span class="panel-hint">每 15 秒自动刷新</span>
+          </div>
+          <div class="status-table" id="status-targets">
+            <div class="empty-state">正在加载目标…</div>
+          </div>
+        </section>
+
+        <section class="panel stats-panel" aria-labelledby="status-stats-title">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">趋势</p>
+              <h2 id="status-stats-title">近 7 天访问</h2>
+            </div>
+            <span class="panel-hint" id="status-stats-summary">暂无统计</span>
+          </div>
+          <div class="stats-bars" id="status-stats-bars" role="img" aria-label="近 7 天每日访问次数"></div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>Blitz Keepalive 只读状态页</span>
+        <a class="text-button" href="/admin">管理控制台</a>
+      </footer>
+    </div>
+    <script type="module" src="/assets/status.js"></script>
+  </body>
+</html>

@@ -19,6 +19,7 @@ const state = {
   targetSearch: '',
   targetFilter: 'all',
   lastRenderedTargets: [],
+  targetsSignature: '',
   toastTimer: null,
 };
 
@@ -27,6 +28,10 @@ const elements = {
   connectionLabel: document.getElementById('connection-label'),
   refreshButton: document.getElementById('refresh-button'),
   runAllButton: document.getElementById('run-all-button'),
+  pauseAllButton: document.getElementById('pause-all-button'),
+  resumeAllButton: document.getElementById('resume-all-button'),
+  topbarSecondary: document.getElementById('topbar-secondary'),
+  topbarMoreToggle: document.getElementById('topbar-more-toggle'),
   addTargetButton: document.getElementById('add-target-button'),
   addTargetSecondary: document.getElementById('add-target-secondary'),
   securityButton: document.getElementById('security-button'),
@@ -59,6 +64,8 @@ const elements = {
   metricMemory: document.getElementById('metric-memory'),
   metricBrowsers: document.getElementById('metric-browsers'),
   metricQueue: document.getElementById('metric-queue'),
+  statsBars: document.getElementById('stats-bars'),
+  statsSummary: document.getElementById('stats-summary'),
   targetSearch: document.getElementById('target-search'),
   targetFilters: document.getElementById('target-filters'),
   targetFilterSummary: document.getElementById('target-filter-summary'),
@@ -90,8 +97,23 @@ const elements = {
   targetClearPassword: document.getElementById('target-clear-password'),
   targetInterval: document.getElementById('target-interval'),
   targetJitter: document.getElementById('target-jitter'),
+  targetWakeWait: document.getElementById('target-wake-wait'),
   targetExpect: document.getElementById('target-expect'),
   targetLoginSuccessSelector: document.getElementById('target-login-success-selector'),
+  targetScheduleEnabled: document.getElementById('target-schedule-enabled'),
+  targetScheduleFields: document.getElementById('target-schedule-fields'),
+  targetScheduleStart: document.getElementById('target-schedule-start'),
+  targetScheduleEnd: document.getElementById('target-schedule-end'),
+  targetScheduleTimezone: document.getElementById('target-schedule-timezone'),
+  targetScheduleDays: document.getElementById('target-schedule-days'),
+  targetFirstWakeWait: document.getElementById('target-first-wake-wait'),
+  targetFirstTimeout: document.getElementById('target-first-timeout'),
+  targetFirstRetries: document.getElementById('target-first-retries'),
+  targetKeepOpenEnabled: document.getElementById('target-keep-open-enabled'),
+  targetKeepOpenFields: document.getElementById('target-keep-open-fields'),
+  targetKeepOpenScheduled: document.getElementById('target-keep-open-scheduled'),
+  targetKeepOpenStart: document.getElementById('target-keep-open-start'),
+  targetKeepOpenEnd: document.getElementById('target-keep-open-end'),
   targetFormError: document.getElementById('target-form-error'),
   targetSave: document.getElementById('target-save'),
   targetCancel: document.getElementById('target-cancel'),
@@ -128,6 +150,11 @@ const eventLabels = {
   'target-auto-paused': '自动暂停目标',
   'scheduled-paused': '跳过暂停目标',
   'targets-imported': '导入目标',
+  'targets-paused-all': '批量暂停',
+  'targets-resumed-all': '批量恢复',
+  'target-probed': '测试连通',
+  'webhook-sent': '告警已推送',
+  'webhook-failed': '告警推送失败',
   'logs-cleared': '清空日志',
 };
 
@@ -166,10 +193,16 @@ function hideError() {
   elements.errorBanner.hidden = true;
 }
 
+function closeTopbarMenu() {
+  elements.topbarSecondary.classList.remove('is-open');
+  elements.topbarMoreToggle.setAttribute('aria-expanded', 'false');
+}
+
 function showLogin(message, { clearPassword = false } = {}) {
   state.authenticated = false;
   closeTargetDialog();
   closePasswordDialog();
+  closeTopbarMenu();
   elements.authPanel.hidden = false;
   elements.dashboardContent.hidden = true;
   elements.addTargetButton.hidden = true;
@@ -178,6 +211,9 @@ function showLogin(message, { clearPassword = false } = {}) {
   elements.logoutButton.hidden = true;
   elements.refreshButton.hidden = true;
   elements.runAllButton.hidden = true;
+  elements.pauseAllButton.hidden = true;
+  elements.resumeAllButton.hidden = true;
+  elements.topbarMoreToggle.hidden = true;
   setConnection('auth', '需要登录');
   if (message) elements.authMessage.textContent = message;
   if (clearPassword) elements.passwordInput.value = '';
@@ -194,6 +230,9 @@ function showDashboard() {
   elements.logoutButton.hidden = !state.authRequired;
   elements.refreshButton.hidden = false;
   elements.runAllButton.hidden = false;
+  elements.pauseAllButton.hidden = false;
+  elements.resumeAllButton.hidden = false;
+  elements.topbarMoreToggle.hidden = false;
   setConnection('online', '已连接');
 }
 
@@ -262,7 +301,11 @@ async function loadOverview({ silent = false } = {}) {
   const controller = new AbortController();
   overviewController = controller;
   state.loading = true;
-  if (!silent) setConnection('loading', '连接中');
+  if (!silent) {
+    setConnection('loading', '连接中');
+    elements.refreshButton.disabled = true;
+    elements.refreshButton.textContent = '刷新中…';
+  }
 
   try {
     const response = await fetch('/api/overview', {
@@ -299,6 +342,10 @@ async function loadOverview({ silent = false } = {}) {
       overviewController = null;
       state.loading = false;
     }
+    if (!silent) {
+      elements.refreshButton.disabled = false;
+      elements.refreshButton.textContent = '刷新';
+    }
   }
 }
 
@@ -308,8 +355,8 @@ function render(data) {
   const readiness = data.readiness || {};
   const targets = Array.isArray(data.targets) ? data.targets : [];
   const logs = Array.isArray(data.logs) ? data.logs : [];
-  const healthy = targets.filter((target) => target.lastVisit?.ok === true).length;
-  const failing = targets.filter((target) => Number(target.consecutiveFailures) > 0).length;
+  const healthy = targets.filter(targetIsHealthy).length;
+  const failing = targets.filter(targetHasFailure).length;
   const paused = targets.filter((target) => target.paused === true).length;
   const overall =
     data.overall ||
@@ -328,11 +375,72 @@ function render(data) {
   setText(elements.metricMemory, formatBytes(runtime.memoryUsage?.rss));
   setText(elements.metricBrowsers, String(runtime.activeBrowsers ?? 0));
   setText(elements.metricQueue, String(runtime.queueLength ?? 0));
+  renderStats(data.stats);
   setText(elements.lastSweep, status.lastSweepAt ? formatDateTime(status.lastSweepAt) : '等待首轮');
   setText(elements.uptime, formatUptime(status.uptimeSec));
   setText(elements.lastUpdated, formatDateTime(data.generatedAt));
-  renderTargets(targets);
+  // Avoid rebuilding every card on each 10s poll: the DOM is identical unless
+  // the data changed, and replacing it drops focus/selection inside the list.
+  const signature = JSON.stringify(targets);
+  if (signature !== state.targetsSignature) {
+    state.targetsSignature = signature;
+    renderTargets(targets);
+  } else {
+    state.lastRenderedTargets = targets;
+  }
   renderLogs(logs);
+}
+
+function renderStats(stats) {
+  if (!elements.statsBars) return;
+  const days = Array.isArray(stats?.last7Days) ? stats.last7Days : [];
+  const totals = stats?.totals || {};
+  if (days.length === 0) {
+    elements.statsBars.replaceChildren(createEmptyState('暂无访问统计，完成首轮巡检后显示。'));
+    setText(elements.statsSummary, '暂无统计');
+    return;
+  }
+  const max = Math.max(1, ...days.map((day) => Number(day.visits) || 0));
+  const fragment = document.createDocumentFragment();
+  days.forEach((day, index) => {
+    const visits = Number(day.visits) || 0;
+    const failed = Number(day.failed) || 0;
+    const bar = document.createElement('div');
+    bar.className = 'stats-bar';
+    bar.title = `${day.date}：${visits} 次访问，${failed} 次失败`;
+    if (index === days.length - 1) bar.dataset.today = 'true';
+
+    const value = document.createElement('strong');
+    value.className = 'stats-bar-value';
+    value.textContent = String(visits);
+
+    const track = document.createElement('div');
+    track.className = 'stats-bar-track';
+    const fill = document.createElement('div');
+    fill.className = 'stats-bar-fill';
+    fill.dataset.state = failed > 0 ? 'warn' : 'ok';
+    fill.style.height = `${visits > 0 ? Math.max(6, Math.round((visits / max) * 100)) : 2}%`;
+    track.append(fill);
+
+    const label = document.createElement('span');
+    label.className = 'stats-bar-label';
+    label.textContent = String(day.date).slice(5);
+
+    bar.append(value, track, label);
+    fragment.append(bar);
+  });
+  elements.statsBars.replaceChildren(fragment);
+  setText(
+    elements.statsSummary,
+    `累计 ${totals.visits ?? 0} 次 · 失败 ${totals.failed ?? 0} 次 · 平均 ${formatDurationMs(totals.avgMs)}`,
+  );
+}
+
+function formatDurationMs(ms) {
+  const seconds = Math.max(0, Math.round(Number(ms) || 0) / 1000);
+  if (seconds < 1) return '0 秒';
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  return `${(seconds / 60).toFixed(1)} 分钟`;
 }
 
 function renderOverall(overall, targets, failing, readiness = {}) {
@@ -411,21 +519,34 @@ function targetMatchesFilters(target) {
   }
 
   if (state.targetFilter === 'paused') return target.paused === true;
-  if (target.paused) return false;
-  if (state.targetFilter === 'healthy') {
-    return target.lastVisit?.ok === true && !(target.readinessIssues?.length > 0);
-  }
-  if (state.targetFilter === 'failing') {
-    return (
-      target.lastVisit?.ok === false ||
-      Number(target.consecutiveFailures) > 0 ||
-      target.readinessIssues?.length > 0
-    );
-  }
+  if (state.targetFilter === 'keep-open') return !target.paused && target.keepOpenActive === true;
+  if (state.targetFilter === 'scheduled-off') return !target.paused && target.scheduledOff === true;
+  if (target.paused || target.scheduledOff) return false;
+  if (state.targetFilter === 'healthy') return targetIsHealthy(target);
+  if (state.targetFilter === 'failing') return targetHasFailure(target);
   if (state.targetFilter === 'waiting') {
     return !target.lastVisit && Number(target.consecutiveFailures) === 0;
   }
   return true;
+}
+
+function targetIsHealthy(target) {
+  return (
+    !target.paused &&
+    !target.scheduledOff &&
+    target.lastVisit?.ok === true &&
+    !(target.readinessIssues?.length > 0)
+  );
+}
+
+function targetHasFailure(target) {
+  return (
+    !target.paused &&
+    !target.scheduledOff &&
+    (target.lastVisit?.ok === false ||
+      Number(target.consecutiveFailures) > 0 ||
+      target.readinessIssues?.length > 0)
+  );
 }
 
 function resetTargetFilters() {
@@ -442,15 +563,34 @@ function resetTargetFilters() {
 
 function targetState(target) {
   if (target.paused) return { key: 'paused', label: '已暂停' };
+  if (target.keepOpenActive) return { key: 'keep-open', label: '挂机保持中' };
+  if (target.scheduledOff) return { key: 'scheduled-off', label: '计划关闭' };
   if (target.running) return { key: 'running', label: '巡检中' };
   if (target.locked) return { key: 'pending', label: '处理中' };
   if (target.pendingRun) return { key: 'pending', label: '已排队' };
-  if (target.readinessIssues?.length > 0) return { key: 'failed', label: '需关注' };
+  const waking = formatWakingState(target.lastVisit);
+  const issues = Array.isArray(target.readinessIssues) ? target.readinessIssues : [];
+  // 唤醒中的 502/503/504 会自然累计连续失败，不应因此遮住更具体的唤醒状态；
+  // 认证失败、成功记录过期、调度超时等问题仍优先显示为“需关注”。
+  if (waking && issues.every((issue) => issue === 'consecutive-failures')) return waking;
+  if (issues.length > 0) return { key: 'failed', label: '需关注' };
+  if (waking) return waking;
   if (target.lastVisit?.ok === true) return { key: 'ok', label: '正常' };
   if (target.lastVisit || Number(target.consecutiveFailures) > 0) {
     return { key: 'failed', label: '异常' };
   }
   return { key: 'idle', label: '等待首轮' };
+}
+
+function formatWakingState(visit) {
+  const match = /^not-ready:http-(502|503|504)$/.exec(String(visit?.reason || ''));
+  if (!match) return null;
+  const labels = {
+    502: '服务启动中',
+    503: '服务唤醒中',
+    504: '网关响应超时',
+  };
+  return { key: 'waking', label: labels[match[1]] };
 }
 
 function createTargetCard(target) {
@@ -502,6 +642,31 @@ function createTargetCard(target) {
     pauseNotice.append(pauseTitle, pauseDetail);
   }
 
+  let scheduleNotice = null;
+  if (!target.paused && target.scheduledOff) {
+    scheduleNotice = document.createElement('div');
+    scheduleNotice.className = 'target-schedule-notice';
+    const scheduleTitle = document.createElement('strong');
+    scheduleTitle.textContent = '当前处于计划关闭时段';
+    const scheduleDetail = document.createElement('span');
+    scheduleDetail.textContent = target.scheduleNextStart
+      ? `预计将在 ${formatDateTime(target.scheduleNextStart)} 自动开启并立即发起首次唤醒。`
+      : '将在下一有效活动窗口自动开启。';
+    scheduleNotice.append(scheduleTitle, scheduleDetail);
+  }
+
+  let keepOpenNotice = null;
+  if (target.keepOpenActive) {
+    keepOpenNotice = document.createElement('div');
+    keepOpenNotice.className = 'target-keep-open-notice';
+    const keepOpenTitle = document.createElement('strong');
+    keepOpenTitle.textContent = '浏览器长驻挂机保持中';
+    const keepOpenDetail = document.createElement('span');
+    const mins = Math.floor((target.keepOpenDurationSec || 0) / 60);
+    keepOpenDetail.textContent = `页面持续保持打开与心跳探活，已保持访问约 ${mins} 分钟。`;
+    keepOpenNotice.append(keepOpenTitle, keepOpenDetail);
+  }
+
   const facts = document.createElement('dl');
   facts.className = 'target-facts';
   appendFact(
@@ -509,6 +674,22 @@ function createTargetCard(target) {
     '访问窗口',
     `${target.intervalMin ?? '--'} 分钟 + 最多 ${target.jitterMin ?? '--'} 分钟`,
   );
+  if (target.scheduleEnabled) {
+    const daysStr = formatScheduleDays(target.scheduleDays);
+    appendFact(facts, '定时窗口', `${target.scheduleStart} - ${target.scheduleEnd} (${daysStr})`);
+    if (target.scheduleTimezone) {
+      appendFact(facts, '活动时区', target.scheduleTimezone);
+    }
+    if (target.firstVisitPending) {
+      appendFact(facts, '首次唤醒', '待执行（独立唤醒参数）');
+    }
+  }
+  if (target.keepOpenEnabled) {
+    const modeDesc = target.keepOpenScheduled
+      ? `定时保持 (${target.keepOpenStart} - ${target.keepOpenEnd})`
+      : '手动启闭';
+    appendFact(facts, '长驻挂机', target.keepOpenActive ? `保持中 · ${modeDesc}` : `就绪 · ${modeDesc}`);
+  }
   appendFact(facts, '保活状态', formatTargetReadiness(target));
   const nextDue = appendFact(facts, '下次执行', formatNext(target.nextDue));
   if (target.nextDue) nextDue.dataset.nextDue = target.nextDue;
@@ -538,30 +719,44 @@ function createTargetCard(target) {
   const actions = document.createElement('div');
   actions.className = 'target-actions';
   const runButton = makeActionButton('立即巡检', 'button button-quiet', () => triggerRun(target.id, runButton));
-  runButton.disabled = Boolean(target.paused || target.running || target.locked || target.pendingRun);
+  runButton.disabled = Boolean(target.paused || target.running || target.locked || target.pendingRun || target.keepOpenActive);
+
+  const probeButton = makeActionButton('测试连通', 'button button-quiet', () =>
+    probeTargetAction(target, probeButton),
+  );
+  probeButton.disabled = Boolean(target.running || target.locked);
+
+  const toggleKeepOpenButton = makeActionButton(
+    target.keepOpenActive ? '停止保持' : '保持访问',
+    target.keepOpenActive ? 'button button-primary' : 'button button-quiet',
+    () => toggleTargetKeepOpen(target, toggleKeepOpenButton),
+  );
+  toggleKeepOpenButton.disabled = Boolean(target.paused || target.running || target.locked || target.pendingRun);
+
   const togglePauseButton = makeActionButton(
     target.paused ? '恢复调度' : '暂停',
     'button button-quiet',
     () => toggleTargetPause(target, togglePauseButton),
   );
-  togglePauseButton.disabled = Boolean(target.running || target.locked || target.pendingRun);
-  actions.append(runButton, togglePauseButton);
+  togglePauseButton.disabled = Boolean(target.running || target.locked || target.pendingRun || target.keepOpenActive);
+  actions.append(runButton, probeButton, toggleKeepOpenButton, togglePauseButton);
 
   if (target.editable) {
     const editButton = makeActionButton('编辑', 'button button-quiet', () => openTargetDialog(target));
     const deleteButton = makeActionButton('删除', 'button button-danger', () => deleteTarget(target));
-    editButton.disabled = Boolean(target.locked);
-    deleteButton.disabled = Boolean(target.locked);
+    editButton.disabled = Boolean(target.locked || target.keepOpenActive);
+    deleteButton.disabled = Boolean(target.locked || target.keepOpenActive);
     actions.append(editButton, deleteButton);
   }
 
   footer.append(reason, actions);
-  card.append(head, url, ...(pauseNotice ? [pauseNotice] : []), facts, footer);
+  card.append(head, url, ...(pauseNotice ? [pauseNotice] : keepOpenNotice ? [keepOpenNotice] : scheduleNotice ? [scheduleNotice] : []), facts, footer);
   return card;
 }
 
 function formatTargetReadiness(target) {
   if (target.paused) return '已暂停';
+  if (target.scheduledOff) return '计划关闭';
   const labels = {
     'consecutive-failures': '连续失败',
     'schedule-overdue': '调度超时',
@@ -651,8 +846,11 @@ function renderLogs(logs) {
 
 function formatLogDetail(entry) {
   const pieces = [];
-  if (entry.reason) pieces.push(formatReason(entry.reason));
-  if (entry.status) pieces.push(`HTTP ${entry.status}`);
+  const reason = String(entry.reason || '');
+  if (reason) pieces.push(formatReason(reason));
+  if (entry.status && !/^not-ready:http-\d{3}$/.test(reason)) {
+    pieces.push(`HTTP ${entry.status}`);
+  }
   if (entry.title) pieces.push(entry.title);
   if (entry.nextVisitInMin !== undefined) pieces.push(`下次约 ${entry.nextVisitInMin} 分钟`);
   if (entry.attempts) pieces.push(`尝试 ${entry.attempts} 次`);
@@ -673,6 +871,9 @@ function formatLogDetail(entry) {
 function formatReason(raw) {
   const value = String(raw || '');
   if (value === 'ready') return '页面就绪';
+  if (value === 'not-ready:http-503') return '服务唤醒中 (HTTP 503)';
+  if (value === 'not-ready:http-502') return '服务启动中 (HTTP 502)';
+  if (value === 'not-ready:http-504') return '网关响应超时 (HTTP 504)';
   if (value === 'expect-text-missing') return '未找到期望文本';
   if (value === 'empty-page') return '页面为空';
   if (value === 'not-ready-timeout') return '等待页面就绪超时';
@@ -751,6 +952,16 @@ function createEmptyState(message) {
   return element;
 }
 
+function updateTargetScheduleFields() {
+  const enabled = elements.targetScheduleEnabled.checked;
+  elements.targetScheduleFields.hidden = !enabled;
+}
+
+function updateTargetKeepOpenFields() {
+  const enabled = elements.targetKeepOpenEnabled.checked;
+  elements.targetKeepOpenFields.hidden = !enabled;
+}
+
 function updateTargetProxyFields() {
   const custom = elements.targetProxyMode.value === 'custom';
   elements.targetProxyFields.hidden = !custom;
@@ -797,6 +1008,7 @@ function openTargetDialog(target = null) {
   elements.targetProxyBypass.value = target?.proxyBypass || target?.proxy?.bypass || '';
   elements.targetInterval.value = String(target?.intervalMin ?? 20);
   elements.targetJitter.value = String(target?.jitterMin ?? 2);
+  elements.targetWakeWait.value = String(target?.wakeWaitSec ?? 30);
   elements.targetExpect.value = target?.expect || '';
   elements.targetLoginSuccessSelector.value = target?.loginSuccessSelector || '';
   elements.targetLoginPassword.value = '';
@@ -811,6 +1023,25 @@ function openTargetDialog(target = null) {
   } else {
     elements.targetLoginPasswordHint.textContent = '尚未配置，填写后巡检会自动登录目标后台。';
   }
+  const scheduleEnabled = Boolean(target?.scheduleEnabled);
+  elements.targetScheduleEnabled.checked = scheduleEnabled;
+  elements.targetScheduleStart.value = target?.scheduleStart || '08:00';
+  elements.targetScheduleEnd.value = target?.scheduleEnd || '23:00';
+  elements.targetScheduleTimezone.value = target?.scheduleTimezone || '';
+  const selectedDays = new Set(target?.scheduleDays ?? [1, 2, 3, 4, 5, 6, 7]);
+  for (const checkbox of elements.targetScheduleDays.querySelectorAll('input[type="checkbox"]')) {
+    checkbox.checked = selectedDays.has(Number(checkbox.value));
+  }
+  elements.targetFirstWakeWait.value = String(target?.firstVisitWakeWaitSec ?? 180);
+  elements.targetFirstTimeout.value = String(target?.firstVisitTimeoutSec ?? 180);
+  elements.targetFirstRetries.value = String(target?.firstVisitRetries ?? 2);
+  const keepOpenEnabled = Boolean(target?.keepOpenEnabled);
+  elements.targetKeepOpenEnabled.checked = keepOpenEnabled;
+  elements.targetKeepOpenScheduled.checked = Boolean(target?.keepOpenScheduled);
+  elements.targetKeepOpenStart.value = target?.keepOpenStart || '09:00';
+  elements.targetKeepOpenEnd.value = target?.keepOpenEnd || '18:00';
+  updateTargetScheduleFields();
+  updateTargetKeepOpenFields();
   updateTargetProxyFields();
   elements.targetDialog.showModal();
   window.requestAnimationFrame(() => elements.targetUrl.focus());
@@ -916,6 +1147,15 @@ function showTargetFormError(message) {
   elements.targetFormError.hidden = false;
 }
 
+function isValidTimeZoneName(value) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validateTargetPayload(payload) {
   let parsedUrl;
   try {
@@ -933,6 +1173,48 @@ function validateTargetPayload(payload) {
   }
   if (payload.intervalMin + payload.jitterMin > 28) {
     return '巡检间隔与随机抖动之和不能超过 28 分钟，否则可能错过 30 分钟休眠窗口。';
+  }
+  if (payload.wakeWaitSec !== undefined) {
+    if (!Number.isInteger(payload.wakeWaitSec) || payload.wakeWaitSec < 5 || payload.wakeWaitSec > 300) {
+      return '常规唤醒等待时间必须是 5–300 之间的整数（秒）。';
+    }
+  }
+  if (payload.keepOpenEnabled && payload.keepOpenScheduled) {
+    if (!payload.keepOpenStart || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(payload.keepOpenStart)) {
+      return '挂机开始时间必须是 24 小时制 HH:MM 格式。';
+    }
+    if (!payload.keepOpenEnd || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(payload.keepOpenEnd)) {
+      return '挂机结束时间必须是 24 小时制 HH:MM 格式。';
+    }
+    if (payload.keepOpenStart === payload.keepOpenEnd) {
+      return '挂机开始时间与结束时间不能相同；跨午夜请使用 22:00 - 02:00 这种写法。';
+    }
+  }
+  if (payload.scheduleEnabled) {
+    if (!payload.scheduleStart || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(payload.scheduleStart)) {
+      return '活动开始时间必须是 24 小时制 HH:MM 格式。';
+    }
+    if (!payload.scheduleEnd || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(payload.scheduleEnd)) {
+      return '活动结束时间必须是 24 小时制 HH:MM 格式。';
+    }
+    if (payload.scheduleStart === payload.scheduleEnd) {
+      return '活动开始时间与结束时间不能相同；跨午夜请使用 22:00 - 02:00 这种写法。';
+    }
+    if (payload.scheduleTimezone && !isValidTimeZoneName(payload.scheduleTimezone)) {
+      return '活动窗口时区不是有效的 IANA 时区（例如 Asia/Shanghai）。';
+    }
+    if (!Array.isArray(payload.scheduleDays) || payload.scheduleDays.length === 0) {
+      return '启用定时启停时，至少必须选择一个生效星期。';
+    }
+  }
+  if (!Number.isInteger(payload.firstVisitWakeWaitSec) || payload.firstVisitWakeWaitSec < 5 || payload.firstVisitWakeWaitSec > 300) {
+    return '首次唤醒等待时间必须是 5–300 之间的整数（秒）。';
+  }
+  if (!Number.isInteger(payload.firstVisitTimeoutSec) || payload.firstVisitTimeoutSec < 5 || payload.firstVisitTimeoutSec > 300) {
+    return '首次页面超时时间必须是 5–300 之间的整数（秒）。';
+  }
+  if (!Number.isInteger(payload.firstVisitRetries) || payload.firstVisitRetries < 0 || payload.firstVisitRetries > 5) {
+    return '首次重试次数必须是 0–5 之间的整数。';
   }
   if (payload.id && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(payload.id)) {
     return '目标名称只能包含字母、数字、点、下划线和短横线，长度 1–64。';
@@ -998,15 +1280,32 @@ async function submitTargetForm(event) {
   event.preventDefault();
   if (state.saving) return;
 
+  const selectedDays = [];
+  for (const checkbox of elements.targetScheduleDays.querySelectorAll('input[type="checkbox"]:checked')) {
+    selectedDays.push(Number(checkbox.value));
+  }
   const payload = {
     url: elements.targetUrl.value.trim(),
     id: elements.targetId.value.trim(),
     account: elements.targetAccount.value.trim(),
     intervalMin: Number(elements.targetInterval.value),
     jitterMin: Number(elements.targetJitter.value),
+    wakeWaitSec: Number(elements.targetWakeWait.value),
     expect: elements.targetExpect.value.trim(),
     loginSuccessSelector: elements.targetLoginSuccessSelector.value.trim(),
     proxyMode: elements.targetProxyMode.value,
+    scheduleEnabled: elements.targetScheduleEnabled.checked,
+    scheduleStart: elements.targetScheduleStart.value.trim(),
+    scheduleEnd: elements.targetScheduleEnd.value.trim(),
+    scheduleTimezone: elements.targetScheduleTimezone.value.trim(),
+    scheduleDays: selectedDays,
+    firstVisitWakeWaitSec: Number(elements.targetFirstWakeWait.value),
+    firstVisitTimeoutSec: Number(elements.targetFirstTimeout.value),
+    firstVisitRetries: Number(elements.targetFirstRetries.value),
+    keepOpenEnabled: elements.targetKeepOpenEnabled.checked,
+    keepOpenScheduled: elements.targetKeepOpenScheduled.checked,
+    keepOpenStart: elements.targetKeepOpenStart.value.trim(),
+    keepOpenEnd: elements.targetKeepOpenEnd.value.trim(),
   };
   if (payload.proxyMode === 'custom') {
     payload.proxy = elements.targetProxy.value.trim();
@@ -1088,7 +1387,7 @@ async function submitTargetForm(event) {
 }
 
 async function deleteTarget(target) {
-  if (target.locked) return;
+  if (target.locked || target.keepOpenActive) return;
   if (!window.confirm(`确定删除目标“${target.id}”吗？删除后不会影响静态配置文件。`)) return;
   try {
     const response = await fetch(`/api/targets/${encodeURIComponent(target.id)}`, {
@@ -1107,6 +1406,31 @@ async function deleteTarget(target) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     showToast(`删除失败：${message}`, 'error');
+  }
+}
+
+async function toggleTargetKeepOpen(target, button) {
+  const nextAction = target.keepOpenActive ? 'stop' : 'start';
+  const label = nextAction === 'start' ? '开启长驻挂机保持访问' : '停止长驻挂机保持';
+  if (!window.confirm(`确定要为目标「${target.id}」${label}吗？`)) {
+    return;
+  }
+  button.disabled = true;
+  try {
+    const res = await apiFetch(`/api/targets/${encodeURIComponent(target.id)}/keep-open`, {
+      method: 'POST',
+      body: JSON.stringify({ action: nextAction }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || '操作失败');
+    }
+    showToast(nextAction === 'start' ? '已开启长驻挂机保持' : '已停止长驻挂机保持');
+    await loadOverview();
+  } catch (error) {
+    showToast(`操作失败：${error.message}`);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1184,6 +1508,49 @@ async function exportTargets() {
   }
 }
 
+function buildImportPreview(payload) {
+  const incoming = Array.isArray(payload?.targets) ? payload.targets : [];
+  const current = new Map(
+    (state.data?.targets || [])
+      .filter((target) => target.source === 'managed')
+      .map((target) => [target.id, target]),
+  );
+  const incomingIds = new Set();
+  let added = 0;
+  let updated = 0;
+  let unchanged = 0;
+  for (const item of incoming) {
+    const id = String(item?.id ?? '');
+    if (!id) continue;
+    incomingIds.add(id);
+    const existing = current.get(id);
+    if (!existing) {
+      added += 1;
+      continue;
+    }
+    const fields = [
+      'url',
+      'intervalMin',
+      'jitterMin',
+      'expect',
+      'scheduleEnabled',
+      'scheduleStart',
+      'scheduleEnd',
+      'scheduleTimezone',
+      'keepOpenEnabled',
+      'keepOpenStart',
+      'keepOpenEnd',
+    ];
+    const changed = fields.some(
+      (key) => JSON.stringify(item[key] ?? null) !== JSON.stringify(existing[key] ?? null),
+    );
+    if (changed) updated += 1;
+    else unchanged += 1;
+  }
+  const removed = [...current.keys()].filter((id) => !incomingIds.has(id)).length;
+  return { total: incoming.length, added, updated, unchanged, removed };
+}
+
 async function importTargetsFile(file) {
   if (!file) return;
   if (file.size > 128 * 1024) {
@@ -1197,11 +1564,15 @@ async function importTargetsFile(file) {
     showToast('导入文件不是有效的 JSON。', 'error');
     return;
   }
+  const preview = buildImportPreview(payload);
   if (
     !window.confirm(
-      '导入会完整替换当前所有网页管理目标；静态配置文件目标不受影响。确定继续吗？',
+      `导入将完整替换当前网页管理目标（静态配置文件目标不受影响）。\n\n` +
+        `共 ${preview.total} 个：新增 ${preview.added} · 更新 ${preview.updated} · 不变 ${preview.unchanged} · 移除 ${preview.removed}\n\n` +
+        '确定继续吗？',
     )
   ) {
+    elements.targetImportFile.value = '';
     return;
   }
 
@@ -1256,6 +1627,73 @@ async function triggerRun(targetId = null, button = null) {
   } finally {
     if (button) button.disabled = false;
     elements.runAllButton.disabled = false;
+  }
+}
+
+async function probeTargetAction(target, button) {
+  if (button) {
+    button.disabled = true;
+    button.textContent = '探测中…';
+  }
+  try {
+    const response = await fetch(`/api/targets/${encodeURIComponent(target.id)}/probe`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+    const data = await readJson(response);
+    if (response.status === 401) {
+      showLogin('登录已过期，请重新输入管理密码。', { clearPassword: true });
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || `服务返回 HTTP ${response.status}`);
+    const probe = data.probe || {};
+    const detail = probe.ok
+      ? `HTTP ${probe.httpStatus ?? '-'} · ${probe.ms ?? 0} ms${probe.proxy?.auth ? ' · 已走代理' : ''}`
+      : `未就绪：${formatReason(probe.reason)} · HTTP ${probe.httpStatus ?? '-'} · ${probe.ms ?? 0} ms`;
+    showToast(`${target.id}：${detail}`, probe.ok ? 'success' : 'error');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast(`测试连通失败：${message}`, 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = '测试连通';
+    }
+  }
+}
+
+async function bulkTargetAction(action, button) {
+  const label = action === 'pause' ? '暂停' : '恢复';
+  if (!window.confirm(`确定要${label}全部目标吗？${action === 'pause' ? '正在巡检的目标会被跳过。' : ''}`)) {
+    return;
+  }
+  button.disabled = true;
+  try {
+    const response = await fetch(
+      `/api/targets/${action === 'pause' ? 'pause-all' : 'resume-all'}`,
+      {
+        method: 'POST',
+        headers: apiHeaders(),
+        cache: 'no-store',
+        credentials: 'same-origin',
+      },
+    );
+    const data = await readJson(response);
+    if (response.status === 401) {
+      showLogin('登录已过期，请重新输入管理密码。', { clearPassword: true });
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || `服务返回 HTTP ${response.status}`);
+    const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
+    showToast(`${data.message || `已${label}全部目标。`}${skipped > 0 ? ` 跳过 ${skipped} 个正在巡检的目标。` : ''}`);
+    await loadOverview({ silent: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast(`批量${label}失败：${message}`, 'error');
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1370,6 +1808,35 @@ function bindEvents() {
     else loadSession();
   });
   elements.runAllButton.addEventListener('click', () => triggerRun());
+  elements.pauseAllButton.addEventListener('click', () =>
+    bulkTargetAction('pause', elements.pauseAllButton),
+  );
+  elements.resumeAllButton.addEventListener('click', () =>
+    bulkTargetAction('resume', elements.resumeAllButton),
+  );
+  elements.topbarMoreToggle.addEventListener('click', () => {
+    const open = elements.topbarSecondary.classList.toggle('is-open');
+    elements.topbarMoreToggle.setAttribute('aria-expanded', String(open));
+  });
+  elements.topbarSecondary.addEventListener('click', (event) => {
+    if (event.target.closest('button')) closeTopbarMenu();
+  });
+  document.addEventListener('click', (event) => {
+    if (!elements.topbarSecondary.classList.contains('is-open')) return;
+    if (event.target.closest('#topbar-secondary') || event.target.closest('#topbar-more-toggle')) {
+      return;
+    }
+    closeTopbarMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (!elements.topbarSecondary.classList.contains('is-open')) return;
+    closeTopbarMenu();
+    elements.topbarMoreToggle.focus();
+  });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900) closeTopbarMenu();
+  });
   elements.addTargetButton.addEventListener('click', () => openTargetDialog());
   elements.addTargetSecondary.addEventListener('click', () => openTargetDialog());
   elements.securityButton.addEventListener('click', openPasswordDialog);
@@ -1398,6 +1865,8 @@ function bindEvents() {
   elements.authForm.addEventListener('submit', login);
   elements.passwordForm.addEventListener('submit', submitPasswordForm);
   elements.targetForm.addEventListener('submit', submitTargetForm);
+  elements.targetScheduleEnabled.addEventListener('change', updateTargetScheduleFields);
+  elements.targetKeepOpenEnabled.addEventListener('change', updateTargetKeepOpenFields);
   elements.targetProxyMode.addEventListener('change', updateTargetProxyFields);
   elements.targetClearProxyPassword.addEventListener('change', () => {
     if (elements.targetClearProxyPassword.checked) elements.targetProxyPassword.value = '';

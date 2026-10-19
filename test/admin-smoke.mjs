@@ -193,6 +193,8 @@ async function startManagementInstance(tempDir, label, extraEnv = {}) {
       `--managed-targets-file=${path.join(directory, 'managed-targets.json')}`,
       `--admin-password-file=${path.join(directory, 'admin-auth.json')}`,
       `--target-secret-key-file=${path.join(directory, 'target-secrets.key')}`,
+      `--runtime-state-file=${path.join(directory, 'runtime-state.json')}`,
+      `--stats-file=${path.join(directory, 'stats.json')}`,
       `--log-dir=${path.join(directory, 'logs')}`,
       `--lock-file=${path.join(directory, 'keepalive.lock')}`,
       '--interval-min=1',
@@ -269,6 +271,8 @@ async function main() {
       `--managed-targets-file=${managedTargetsFile}`,
       `--admin-password-file=${adminPasswordFile}`,
       `--target-secret-key-file=${targetSecretKeyFile}`,
+      `--runtime-state-file=${path.join(tempDir, 'runtime-state.json')}`,
+      `--stats-file=${path.join(tempDir, 'stats.json')}`,
       `--log-dir=${logDir}`,
       `--lock-file=${lockFile}`,
       '--interval-min=1',
@@ -390,6 +394,7 @@ async function main() {
     assert.equal(changedSessionOverview.response.status, 200);
     assert.equal(changedSessionOverview.data.config.bindHost, '127.0.0.1');
     assert.equal(changedSessionOverview.data.config.requireHttps, false);
+    assert.equal(changedSessionOverview.data.config.maxKeepOpenSessions, 1);
     assert.equal(changedSessionOverview.data.targets.length, 0);
     assert.equal(changedSessionOverview.data.summary.totalTargets, 0);
 
@@ -414,10 +419,30 @@ async function main() {
         jitterMin: 0,
         expect: 'Demo app is online',
         loginPassword: TARGET_PASSWORD,
+        scheduleEnabled: true,
+        scheduleStart: '00:00',
+        scheduleEnd: '23:59',
+        scheduleDays: [1, 2, 3, 4, 5, 6, 7],
+        firstVisitWakeWaitSec: 10,
+        firstVisitTimeoutSec: 15,
+        firstVisitRetries: 0,        keepOpenEnabled: true,
+        keepOpenScheduled: false,
+        keepOpenStart: '10:00',
+        keepOpenEnd: '20:00',
       },
     });
     assert.equal(created.response.status, 201, JSON.stringify(created.data));
     assert.equal(created.data.target.loginPasswordConfigured, true);
+    assert.equal(created.data.target.keepOpenEnabled, true);
+    assert.equal(created.data.target.keepOpenScheduled, false);
+    assert.equal(created.data.target.scheduleEnabled, true);
+    assert.equal(created.data.target.scheduleStart, '00:00');
+    assert.equal(created.data.target.scheduleEnd, '23:59');
+    assert.deepEqual(created.data.target.scheduleDays, [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(created.data.target.firstVisitWakeWaitSec, 10);
+    assert.equal(created.data.target.firstVisitTimeoutSec, 15);
+    assert.equal(created.data.target.firstVisitRetries, 0);
+    assert.equal(created.data.target.keepOpenStart, '10:00');    assert.equal(created.data.target.keepOpenEnd, '20:00');
     assert.equal(created.text.includes(TARGET_PASSWORD), false);
     assert.equal(created.text.includes('loginPasswordEnc'), false);
     const targetId = created.data.target.id;
@@ -435,7 +460,7 @@ async function main() {
     assert.equal(firstTarget.lastVisit.loginPasswordFieldFound, true);
     assert.equal(firstTarget.lastVisit.loginAttempted, true);
     assert.equal(firstTarget.lastVisit.loginSubmitted, true);
-    const firstVisitAt = firstTarget.lastVisit.at;
+    assert.equal(firstTarget.firstVisitPending, false, 'successful first visit must consume the window');    const firstVisitAt = firstTarget.lastVisit.at;
     const firstVisitCount = firstVisit.status.visits;
 
     const manualRun = await request(baseUrl, `/api/run?target=${encodeURIComponent(targetId)}`, {
@@ -478,6 +503,55 @@ async function main() {
     assert.equal(resumed.response.status, 200, JSON.stringify(resumed.data));
     assert.equal(resumed.data.target.paused, false);
 
+    const keepOpenStarted = await request(
+      baseUrl,
+      `/api/targets/${encodeURIComponent(targetId)}/keep-open`,
+      {
+        method: 'POST',
+        cookie,
+        body: { action: 'start' },
+      },
+    );
+    assert.equal(keepOpenStarted.response.status, 200, JSON.stringify(keepOpenStarted.data));
+    assert.equal(keepOpenStarted.data.target.keepOpenActive, true);
+    assert.equal(keepOpenStarted.data.target.keepOpenManual, true);
+
+    const keepOpenBlockedPatch = await request(
+      baseUrl,
+      `/api/targets/${encodeURIComponent(targetId)}`,
+      {
+        method: 'PATCH',
+        cookie,
+        body: { intervalMin: 3 },
+      },
+    );
+    assert.equal(keepOpenBlockedPatch.response.status, 409, JSON.stringify(keepOpenBlockedPatch.data));
+    assert.match(keepOpenBlockedPatch.data.error ?? '', /长驻挂机/);
+
+    const keepOpenBlockedDelete = await request(
+      baseUrl,
+      `/api/targets/${encodeURIComponent(targetId)}`,
+      {
+        method: 'DELETE',
+        cookie,
+      },
+    );
+    assert.equal(keepOpenBlockedDelete.response.status, 409, JSON.stringify(keepOpenBlockedDelete.data));
+    assert.match(keepOpenBlockedDelete.data.error ?? '', /长驻挂机/);
+
+    const keepOpenStopped = await request(
+      baseUrl,
+      `/api/targets/${encodeURIComponent(targetId)}/keep-open`,
+      {
+        method: 'POST',
+        cookie,
+        body: { action: 'stop' },
+      },
+    );
+    assert.equal(keepOpenStopped.response.status, 200, JSON.stringify(keepOpenStopped.data));
+    assert.equal(keepOpenStopped.data.target.keepOpenActive, false);
+    assert.equal(keepOpenStopped.data.target.keepOpenManual, false);
+
     const exported = await request(baseUrl, '/api/targets/export', { cookie });
     assert.equal(exported.response.status, 200, JSON.stringify(exported.data));
     assert.match(
@@ -486,6 +560,13 @@ async function main() {
     );
     assert.equal(exported.data.version, 1);
     assert.equal(exported.data.targets.length, 1);
+    assert.equal(exported.data.targets[0].scheduleEnabled, true);
+    assert.equal(exported.data.targets[0].scheduleStart, '00:00');
+    assert.equal(exported.data.targets[0].scheduleEnd, '23:59');
+    assert.deepEqual(exported.data.targets[0].scheduleDays, [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(exported.data.targets[0].firstVisitWakeWaitSec, 10);
+    assert.equal(exported.data.targets[0].firstVisitTimeoutSec, 15);
+    assert.equal(exported.data.targets[0].firstVisitRetries, 0);
     assert.equal(exported.text.includes(TARGET_PASSWORD), false);
     assert.equal(exported.text.includes('loginPassword'), false);
     assert.equal(exported.text.includes('loginPasswordEnc'), false);
@@ -537,6 +618,17 @@ async function main() {
     assert.equal(importedPersisted.targets.length, 1);
     assert.equal(importedPersisted.targets[0].id, targetId);
     assert.equal(importedPersisted.targets[0].intervalMin, 2);
+    assert.equal(importedPersisted.targets[0].keepOpenEnabled, true);
+    assert.equal(importedPersisted.targets[0].keepOpenScheduled, false);
+    assert.equal(importedPersisted.targets[0].keepOpenStart, '10:00');
+    assert.equal(importedPersisted.targets[0].keepOpenEnd, '20:00');
+    assert.equal(importedPersisted.targets[0].scheduleEnabled, true);
+    assert.equal(importedPersisted.targets[0].scheduleStart, '00:00');
+    assert.equal(importedPersisted.targets[0].scheduleEnd, '23:59');
+    assert.deepEqual(importedPersisted.targets[0].scheduleDays, [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(importedPersisted.targets[0].firstVisitWakeWaitSec, 10);
+    assert.equal(importedPersisted.targets[0].firstVisitTimeoutSec, 15);
+    assert.equal(importedPersisted.targets[0].firstVisitRetries, 0);
     assert.equal(importedPersisted.targets[0].loginPasswordEnc.algorithm, 'aes-256-gcm');
 
     const patched = await request(baseUrl, `/api/targets/${encodeURIComponent(targetId)}`, {
@@ -553,6 +645,17 @@ async function main() {
     assert.equal(persisted.targets.length, 1);
     assert.equal(persisted.targets[0].id, targetId);
     assert.equal(persisted.targets[0].intervalMin, 2);
+    assert.equal(persisted.targets[0].keepOpenEnabled, true);
+    assert.equal(persisted.targets[0].keepOpenScheduled, false);
+    assert.equal(persisted.targets[0].keepOpenStart, '10:00');
+    assert.equal(persisted.targets[0].keepOpenEnd, '20:00');
+    assert.equal(persisted.targets[0].scheduleEnabled, true);
+    assert.equal(persisted.targets[0].scheduleStart, '00:00');
+    assert.equal(persisted.targets[0].scheduleEnd, '23:59');
+    assert.deepEqual(persisted.targets[0].scheduleDays, [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(persisted.targets[0].firstVisitWakeWaitSec, 10);
+    assert.equal(persisted.targets[0].firstVisitTimeoutSec, 15);
+    assert.equal(persisted.targets[0].firstVisitRetries, 0);
     assert.equal(persistedText.includes(TARGET_PASSWORD), false);
     assert.equal(persisted.targets[0].loginPasswordEnc.algorithm, 'aes-256-gcm');
 
@@ -585,6 +688,19 @@ async function main() {
     assert.ok(restoredTarget, 'managed target must survive a process restart');
     assert.equal(restoredTarget.intervalMin, 2);
     assert.equal(restoredTarget.loginPasswordConfigured, true);
+    assert.equal(restoredTarget.keepOpenEnabled, true);
+    assert.equal(restoredTarget.keepOpenScheduled, false);
+    assert.equal(restoredTarget.keepOpenStart, '10:00');
+    assert.equal(restoredTarget.keepOpenEnd, '20:00');
+    assert.equal(restoredTarget.scheduleEnabled, true);
+    assert.equal(restoredTarget.scheduleStart, '00:00');
+    assert.equal(restoredTarget.scheduleEnd, '23:59');
+    assert.deepEqual(restoredTarget.scheduleDays, [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(restoredTarget.firstVisitWakeWaitSec, 10);
+    assert.equal(restoredTarget.firstVisitTimeoutSec, 15);
+    assert.equal(restoredTarget.firstVisitRetries, 0);
+    assert.equal(restoredTarget.keepOpenActive, false);
+    assert.equal(restoredTarget.keepOpenManual, false);
 
     await waitForOverview(
       baseUrl,
@@ -688,6 +804,56 @@ async function main() {
     assert.equal(rateLimitLog.client, '127.0.0.1');
     assert.ok(Number(rateLimitLog.retryAfterSec) > 0);
 
+    const legacyDirectory = path.join(tempDir, 'legacy-record-defaults');
+    await mkdir(legacyDirectory, { recursive: true });
+    const legacyTimestamp = new Date().toISOString();
+    await writeFile(
+      path.join(legacyDirectory, 'managed-targets.json'),
+      JSON.stringify({
+        version: 1,
+        targets: [
+          {
+            id: 'legacy-default-off',
+            url: fakeUrl,
+            intervalMin: 1,
+            jitterMin: 0,
+            expect: 'Demo app is online',
+            createdAt: legacyTimestamp,
+            updatedAt: legacyTimestamp,
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const legacyInstance = await startManagementInstance(
+      tempDir,
+      'legacy-record-defaults',
+      {},
+    );
+    isolatedInstances.push(legacyInstance);
+    const legacyCookie = await login(legacyInstance.baseUrl);
+    const legacyOverview = await request(legacyInstance.baseUrl, '/api/overview', {
+      cookie: legacyCookie,
+    });
+    assert.equal(legacyOverview.response.status, 200, JSON.stringify(legacyOverview.data));
+    const legacyTarget = legacyOverview.data.targets.find(
+      (target) => target.id === 'legacy-default-off',
+    );
+    assert.ok(legacyTarget, 'legacy target must load');
+    assert.equal(legacyTarget.keepOpenEnabled, false);
+    assert.equal(legacyTarget.keepOpenScheduled, false);
+    assert.equal(legacyTarget.keepOpenStart, '09:00');
+    assert.equal(legacyTarget.keepOpenEnd, '18:00');
+    assert.equal(legacyTarget.keepOpenActive, false);
+    assert.equal(legacyTarget.keepOpenManual, false);
+    assert.equal(legacyTarget.scheduleEnabled, false);
+    assert.equal(legacyTarget.scheduleStart, '08:00');
+    assert.equal(legacyTarget.scheduleEnd, '23:00');
+    assert.deepEqual(legacyTarget.scheduleDays, [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(legacyTarget.firstVisitWakeWaitSec, 180);
+    assert.equal(legacyTarget.firstVisitTimeoutSec, 180);
+    assert.equal(legacyTarget.firstVisitRetries, 2);
+
     const readOnlyToken = 'readonly-test-token-9d2c';
     const tokenInstance = await startManagementInstance(tempDir, 'status-token', {
       STATUS_TOKEN: readOnlyToken,
@@ -784,6 +950,9 @@ async function main() {
           'target-login-auto-filled-and-submitted',
           'manual-run',
           'target-pause-resume-and-paused-run-rejected',
+          'keep-open-target-fields-persist-and-restart',
+          'keep-open-target-mutation-locked-while-active',
+          'legacy-target-keep-open-defaults-off',
           'target-export-has-no-secret-material',
           'target-import-atomicity-and-sensitive-field-rejection',
           'target-import-limit',

@@ -1,4 +1,35 @@
 #!/usr/bin/env node
+import {
+  DEFAULT_SCHEDULE_TIMEZONE,
+  DEFAULT_SCHEDULE_START,
+  DEFAULT_SCHEDULE_END,
+  DEFAULT_SCHEDULE_DAYS,
+  DEFAULT_FIRST_VISIT_WAKE_WAIT_SEC,
+  DEFAULT_FIRST_VISIT_TIMEOUT_SEC,
+  DEFAULT_FIRST_VISIT_RETRIES,
+  isValidTimeZone,
+  assertValidTimeZone,
+  normalizeScheduleFields,
+  getScheduleState,
+  getNextWindowStart,
+} from './schedule.mjs';
+import {
+  KeepOpenCapacityError,
+  createKeepOpenManager,
+  normalizeKeepOpenFields,
+} from './keepopen.mjs';
+import {
+  DEFAULT_TARGET_URL_ALLOWLIST,
+  TargetUrlError,
+  isTrustedProxyAddress,
+  normalizeIpAddress,
+  parseTargetUrlAllowlist,
+  parseTrustedProxyCidrs,
+  validateTargetUrl,
+} from './urlguard.mjs';
+import { createNotifier } from './notify.mjs';
+import { createStatsStore } from './stats.mjs';
+import { writeJsonFileAtomic } from './storage.mjs';
 /**
  * blitz.cloud keep-alive agent (single app or many accounts/apps).
  *
@@ -39,11 +70,10 @@ import {
   statfs,
   truncate,
   unlink,
+  writeFile,
 } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
-import { lookup } from 'node:dns/promises';
 import { createServer } from 'node:http';
-import { BlockList, isIP } from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
@@ -62,7 +92,7 @@ const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const MAX_IMPORT_BODY_BYTES = 128 * 1024;
 const ADMIN_COOKIE_NAME = 'blitz_admin_session';
 const ADMIN_SESSION_TTL_MS = 12 * 60 * MINUTE;
-const DEFAULT_ADMIN_SESSION_IDLE_TIMEOUT_MIN = 30;
+const DEFAULT_ADMIN_SESSION_IDLE_TIMEOUT_MIN = 60;
 const ADMIN_PASSWORD_MIN_LENGTH = 10;
 const ADMIN_PASSWORD_MAX_LENGTH = 256;
 const ADMIN_PASSWORD_FILE_VERSION = 1;
@@ -93,9 +123,27 @@ const READINESS_FAILURE_THRESHOLD = 3;
 const READINESS_GRACE_MS = 10 * MINUTE;
 const FAILURE_BACKOFF_MAX_MULTIPLIER = 4;
 const TARGET_LOGIN_SUCCESS_SELECTOR_MAX_LENGTH = 300;
-const DEFAULT_TARGET_URL_ALLOWLIST = '*.blitz.cloud';
 const FAILURE_DUMP_CLEANUP_INTERVAL_MS = 6 * 60 * MINUTE;
-const TARGET_URL_DNS_CACHE_MS = 60_000;
+const VISIT_DURATION_BUCKETS_SEC = [1, 2, 5, 10, 20, 30, 60, 120, 300];
+const DEFAULT_WEBHOOK_MIN_INTERVAL_SEC = 900;
+const DEFAULT_WEBHOOK_TIMEOUT_SEC = 10;
+const DEFAULT_WEBHOOK_FAILURE_THRESHOLD = 3;
+// A probe is an interactive diagnostic: navigation, wake wait and login
+// navigation each have their own timeout, so the watchdog below is only the sum
+// of those budgets plus slack. It exists to bound a page/browser that stops
+// answering, not to cut a legitimately slow first visit short.
+const PROBE_DEADLINE_FLOOR_MS = 60_000;
+const PROBE_DEADLINE_CEILING_MS = 180_000;
+const PROBE_DEADLINE_SLACK_MS = 30_000;
+const BLOCKABLE_RESOURCE_TYPES = new Set([
+  'image',
+  'media',
+  'font',
+  'stylesheet',
+  'texttrack',
+  'manifest',
+  'other',
+]);
 const MANAGED_TARGETS_FILE_VERSION = 1;
 const RUNTIME_STATE_FILE_VERSION = 1;
 const RUNTIME_STATE_DEBOUNCE_MS = 250;
@@ -104,7 +152,9 @@ const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
 const STATIC_FILES = new Map([
   ['/assets/app.js', { file: 'app.js', type: 'text/javascript; charset=utf-8' }],
+  ['/assets/status.js', { file: 'status.js', type: 'text/javascript; charset=utf-8' }],
   ['/assets/styles.css', { file: 'styles.css', type: 'text/css; charset=utf-8' }],
+  ['/status', { file: 'status.html', type: 'text/html; charset=utf-8' }],
 ]);
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
@@ -123,6 +173,9 @@ const DEFAULT_NOT_READY_PATTERNS = [
   /wakes?\s+in\s+(?:a\s+)?few\s+seconds/i,
   /app\s+is\s+(?:paused|stopped|starting|building|updating)/i,
   /needs\s+attention/i,
+  /503\s+service\s+(?:temporarily\s+)?unavailable/i,
+  /502\s+bad\s+gateway/i,
+  /504\s+gateway\s+timeout/i,
 ];
 
 const CHROME_CANDIDATES = {
@@ -149,43 +202,59 @@ const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 
+/**
+ * Chrome's UA reduction reports `HeadlessChrome/<version>` and a platform token
+ * that can disagree with the host OS. A hardcoded UA therefore tends to
+ * contradict the browser that actually sends it (wrong major version, Windows
+ * token on a Linux container). Derive the UA from the running browser instead,
+ * keeping only the major version, which is what the reduced UA exposes anyway.
+ */
+const UA_PLATFORM_TOKENS = {
+  win32: 'Windows NT 10.0; Win64; x64',
+  darwin: 'Macintosh; Intel Mac OS X 10_15_7',
+  linux: 'X11; Linux x86_64',
+};
+const BROWSER_USER_AGENT_CACHE = new WeakMap();
+
+function buildUserAgentForMajor(major) {
+  const platform = UA_PLATFORM_TOKENS[process.platform] ?? UA_PLATFORM_TOKENS.linux;
+  return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+}
+
+async function userAgentForPage(page) {
+  const browser = typeof page?.browser === 'function' ? page.browser() : null;
+  if (!browser || typeof browser.version !== 'function') return DEFAULT_USER_AGENT;
+  const cached = BROWSER_USER_AGENT_CACHE.get(browser);
+  if (cached) return cached;
+  try {
+    const version = String(await browser.version());
+    const match = version.match(/(\d+)\./);
+    if (!match) return DEFAULT_USER_AGENT;
+    const derived = buildUserAgentForMajor(match[1]);
+    BROWSER_USER_AGENT_CACHE.set(browser, derived);
+    return derived;
+  } catch {
+    return DEFAULT_USER_AGENT;
+  }
+}
+
 const scrypt = promisify(scryptCallback);
 
 let stopping = false;
 const ACTIVE_BROWSERS = new Set();
 const STOP_WAITERS = new Set();
 let runtimeStateStore = null;
-
-const PRIVATE_NETWORKS = new BlockList();
-for (const [network, prefix] of [
-  ['0.0.0.0', 8],
-  ['10.0.0.0', 8],
-  ['100.64.0.0', 10],
-  ['127.0.0.0', 8],
-  ['169.254.0.0', 16],
-  ['172.16.0.0', 12],
-  ['192.0.0.0', 24],
-  ['192.168.0.0', 16],
-  ['198.18.0.0', 15],
-  ['224.0.0.0', 4],
-  ['240.0.0.0', 4],
-]) {
-  PRIVATE_NETWORKS.addSubnet(network, prefix, 'ipv4');
-}
-for (const [network, prefix] of [
-  ['::', 128],
-  ['::1', 128],
-  ['fc00::', 7],
-  ['fe80::', 10],
-  ['ff00::', 8],
-  ['2001:db8::', 32],
-]) {
-  PRIVATE_NETWORKS.addSubnet(network, prefix, 'ipv6');
-}
-const TARGET_URL_DNS_CACHE = new Map();
+let statsStore = null;
+let probeInFlight = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function closeBrowser(browser) {
+  if (!browser) return;
+  ACTIVE_BROWSERS.delete(browser);
+  await browser.close().catch(() => {});
 }
 
 function requestStop() {
@@ -193,8 +262,8 @@ function requestStop() {
   stopping = true;
   for (const resolve of STOP_WAITERS) resolve(true);
   STOP_WAITERS.clear();
-  for (const browser of ACTIVE_BROWSERS) {
-    void browser.close().catch(() => {});
+  for (const browser of [...ACTIVE_BROWSERS]) {
+    void closeBrowser(browser);
   }
 }
 
@@ -257,162 +326,12 @@ function toBool(raw, fallback) {
   return !['false', '0', 'no', 'off'].includes(String(raw).toLowerCase());
 }
 
-class TargetUrlError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'TargetUrlError';
-  }
-}
-
 class LoginFlowError extends Error {
   constructor(code, message) {
     super(message ?? code);
     this.name = 'LoginFlowError';
     this.code = code;
   }
-}
-
-function normalizeHostname(value) {
-  return String(value ?? '').trim().toLowerCase().replace(/\.$/, '');
-}
-
-function parseTargetUrlAllowlist(raw) {
-  const source = raw === undefined || raw === null || String(raw).trim() === ''
-    ? DEFAULT_TARGET_URL_ALLOWLIST
-    : String(raw);
-  const entries = source
-    .split(/[\s,;]+/)
-    .map(normalizeHostname)
-    .filter(Boolean);
-  if (entries.length === 0) entries.push(DEFAULT_TARGET_URL_ALLOWLIST);
-  for (const entry of entries) {
-    if (entry === '*') continue;
-    if (entry.startsWith('*.')) {
-      const domain = entry.slice(2);
-      if (!domain || domain.includes('*') || (!isIP(domain) && !/^[a-z0-9.-]+$/.test(domain))) {
-        throw new Error(`TARGET_URL_ALLOWLIST contains an invalid wildcard entry: ${entry}`);
-      }
-      continue;
-    }
-    if (entry.includes('*') || (!isIP(entry) && !/^[a-z0-9.-]+$/.test(entry))) {
-      throw new Error(`TARGET_URL_ALLOWLIST contains an invalid hostname: ${entry}`);
-    }
-  }
-  return entries;
-}
-
-function targetHostAllowed(hostname, allowlist) {
-  const host = normalizeHostname(hostname);
-  return allowlist.some((entry) => {
-    if (entry === '*') return true;
-    if (entry.startsWith('*.')) return host.endsWith(entry.slice(1));
-    return host === entry;
-  });
-}
-
-function normalizeIpAddress(raw) {
-  const value = String(raw ?? '').trim().replace(/^\[|\]$/g, '');
-  const withoutZone = value.includes('%') ? value.slice(0, value.indexOf('%')) : value;
-  const mapped = withoutZone.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
-  if (mapped && isIP(mapped[1]) === 4) return { address: mapped[1], family: 4 };
-  const family = isIP(withoutZone);
-  return family ? { address: withoutZone, family } : null;
-}
-
-function isPrivateIpAddress(address) {
-  const normalized = normalizeIpAddress(address);
-  if (!normalized) return false;
-  return PRIVATE_NETWORKS.check(
-    normalized.address,
-    normalized.family === 4 ? 'ipv4' : 'ipv6',
-  );
-}
-
-function parseTrustedProxyCidrs(raw) {
-  const block = new BlockList();
-  const entries = String(raw ?? '')
-    .split(/[\s,;]+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  for (const entry of entries) {
-    const separator = entry.lastIndexOf('/');
-    const address = separator === -1 ? entry : entry.slice(0, separator);
-    const family = isIP(address);
-    if (!family) throw new Error(`TRUST_PROXY_CIDRS contains an invalid address: ${entry}`);
-    const maxPrefix = family === 4 ? 32 : 128;
-    const prefix = separator === -1 ? maxPrefix : Number(entry.slice(separator + 1));
-    if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
-      throw new Error(`TRUST_PROXY_CIDRS contains an invalid prefix: ${entry}`);
-    }
-    block.addSubnet(address, prefix, family === 4 ? 'ipv4' : 'ipv6');
-  }
-  return block;
-}
-
-function isTrustedProxyAddress(trustedProxies, address) {
-  const normalized = normalizeIpAddress(address);
-  if (!normalized) return false;
-  return trustedProxies.check(
-    normalized.address,
-    normalized.family === 4 ? 'ipv4' : 'ipv6',
-  );
-}
-
-async function resolveTargetHost(hostname) {
-  const key = normalizeHostname(hostname);
-  const cached = TARGET_URL_DNS_CACHE.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.addresses;
-  let addresses;
-  try {
-    addresses = await lookup(key, { all: true, verbatim: true });
-  } catch {
-    throw new TargetUrlError(`无法解析目标域名：${key}`);
-  }
-  if (!Array.isArray(addresses) || addresses.length === 0) {
-    throw new TargetUrlError(`目标域名没有可用地址：${key}`);
-  }
-  TARGET_URL_DNS_CACHE.set(key, {
-    addresses,
-    expiresAt: Date.now() + TARGET_URL_DNS_CACHE_MS,
-  });
-  return addresses;
-}
-
-async function validateTargetUrl(rawUrl, cfg, { enforceAllowlist = true } = {}) {
-  let url;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    throw new TargetUrlError('目标地址不是有效 URL。');
-  }
-  if (!['http:', 'https:'].includes(url.protocol)) {
-    throw new TargetUrlError('目标地址只允许 http:// 或 https://。');
-  }
-  if (url.username || url.password) {
-    throw new TargetUrlError('目标地址不能包含账号或密码。');
-  }
-  const hostname = normalizeHostname(url.hostname);
-  const allowlist = cfg.targetUrlAllowlist ?? parseTargetUrlAllowlist();
-  if (enforceAllowlist && !targetHostAllowed(hostname, allowlist)) {
-    throw new TargetUrlError(`目标域名不在允许列表内：${hostname}`);
-  }
-
-  const literal = normalizeIpAddress(hostname);
-  if (literal) {
-    if (!cfg.targetUrlAllowPrivate && isPrivateIpAddress(literal.address)) {
-      throw new TargetUrlError(`默认禁止访问私网或本机地址：${hostname}`);
-    }
-    return url;
-  }
-
-  const addresses = await resolveTargetHost(hostname);
-  if (
-    !cfg.targetUrlAllowPrivate &&
-    addresses.some((entry) => isPrivateIpAddress(entry.address))
-  ) {
-    throw new TargetUrlError(`目标域名解析到私网或本机地址：${hostname}`);
-  }
-  return url;
 }
 
 function resolveChrome(args) {
@@ -833,25 +752,6 @@ function readManagedTargetsFile(file) {
   return targets;
 }
 
-async function writeJsonFileAtomic(file, value) {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tempFile = `${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
-  const payload = `${JSON.stringify(value, null, 2)}\n`;
-  let handle;
-  try {
-    handle = await open(tempFile, 'w', 0o600);
-    await handle.writeFile(payload, 'utf8');
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    await rename(tempFile, file);
-  } catch (error) {
-    await handle?.close().catch(() => {});
-    await unlink(tempFile).catch(() => {});
-    throw error;
-  }
-}
-
 async function writeManagedTargetsFile(file, records) {
   await writeJsonFileAtomic(file, {
     version: MANAGED_TARGETS_FILE_VERSION,
@@ -1103,6 +1003,9 @@ function normalizeTarget(raw, globals, index) {
         : 'custom'
       : 'inherit';
 
+  const scheduleFields = normalizeScheduleFields(raw, globals);
+  const keepOpenFields = normalizeKeepOpenFields(raw, globals);
+
   return {
     id,
     account: raw.account ? String(raw.account) : null,
@@ -1117,7 +1020,7 @@ function normalizeTarget(raw, globals, index) {
     wakeWaitMs:
       toNumber(raw.wakeWaitSec ?? globals.wakeWaitSec, `targets[${index}].wakeWaitSec`, {
         min: 5,
-        max: 180,
+        max: 300,
       }) * 1000,
     settleMs:
       toNumber(raw.settleSec ?? globals.settleSec, `targets[${index}].settleSec`, {
@@ -1140,6 +1043,24 @@ function normalizeTarget(raw, globals, index) {
         : String(raw.proxyUsername),
     proxyPasswordConfigured: Boolean(raw.proxyPassword),
     proxy: resolveTargetProxy(raw, globals, index),
+    scheduleEnabled: scheduleFields.scheduleEnabled,
+    scheduleStart: scheduleFields.scheduleStart,
+    scheduleEnd: scheduleFields.scheduleEnd,
+    scheduleDays: scheduleFields.scheduleDays,
+    scheduleTimezone: scheduleFields.scheduleTimezone,
+    firstVisitWakeWaitSec: scheduleFields.firstVisitWakeWaitSec,
+    firstVisitTimeoutSec: scheduleFields.firstVisitTimeoutSec,
+    firstVisitRetries: scheduleFields.firstVisitRetries,
+    keepOpenEnabled: keepOpenFields.keepOpenEnabled,
+    keepOpenScheduled: keepOpenFields.keepOpenScheduled,
+    keepOpenStart: keepOpenFields.keepOpenStart,
+    keepOpenEnd: keepOpenFields.keepOpenEnd,
+    keepOpenManual: false,
+    keepOpenActive: false,
+    firstVisitWindowKey:
+      typeof raw.firstVisitWindowKey === 'string' && raw.firstVisitWindowKey.length <= 128
+        ? raw.firstVisitWindowKey
+        : null,
     nextDue: 0,
     consecutiveFailures: 0,
     authFailureCount: 0,
@@ -1262,12 +1183,22 @@ function buildManagedTarget(
   }
   if (knownIds.has(id)) throw new HttpError(409, `目标名称已存在：${id}`);
 
-  const intervalMin = raw.intervalMin ?? existing?.intervalMin ?? globals.intervalMin;
-  const jitterMin = raw.jitterMin ?? existing?.jitterMin ?? globals.jitterMin;
-  const expect = raw.expect ?? existing?.expect ?? '';
+  const previousRecord = existing ?? persistedRecord;
+  const intervalMin = raw.intervalMin ?? previousRecord?.intervalMin ?? globals.intervalMin;
+  const jitterMin = raw.jitterMin ?? previousRecord?.jitterMin ?? globals.jitterMin;
+  const wakeWaitSec =
+    raw.wakeWaitSec !== undefined
+      ? raw.wakeWaitSec
+      : previousRecord?.wakeWaitSec !== undefined
+        ? previousRecord.wakeWaitSec
+        : undefined;
+  const timeoutSec = raw.timeoutSec ?? previousRecord?.timeoutSec;
+  const settleSec = raw.settleSec ?? previousRecord?.settleSec;
+  const retries = raw.retries ?? previousRecord?.retries;
+  const expect = raw.expect ?? previousRecord?.expect ?? '';
   const loginSuccessSelector =
-    raw.loginSuccessSelector ?? existing?.loginSuccessSelector ?? '';
-  const account = raw.account ?? existing?.account ?? null;
+    raw.loginSuccessSelector ?? previousRecord?.loginSuccessSelector ?? '';
+  const account = raw.account ?? previousRecord?.account ?? null;
   if (typeof expect !== 'string') throw new HttpError(400, '期望文本必须是字符串。');
   if (expect.length > 500) throw new HttpError(400, '期望文本不能超过 500 个字符。');
   if (typeof loginSuccessSelector !== 'string') {
@@ -1308,7 +1239,7 @@ function buildManagedTarget(
     throw new Error('managedTargets records must not contain plaintext loginPassword.');
   }
 
-  const sourceRecord = existing ?? persistedRecord;
+  const sourceRecord = previousRecord;
   if (
     raw.proxyMode !== undefined &&
     (typeof raw.proxyMode !== 'string' || !TARGET_PROXY_MODES.has(raw.proxyMode))
@@ -1354,21 +1285,35 @@ function buildManagedTarget(
   } else if (raw.proxy !== undefined) {
     proxyMode = raw.proxy.trim() === '' ? 'direct' : 'custom';
   } else {
-    proxyMode = existing ? managedRecordProxyMode(existing) : 'inherit';
+    proxyMode = previousRecord ? managedRecordProxyMode(previousRecord) : 'inherit';
+  }
+
+  let scheduleFields;
+  try {
+    scheduleFields = normalizeScheduleFields(raw, previousRecord ?? globals);
+  } catch (error) {
+    throw new HttpError(400, error.message);
+  }
+
+  let keepOpenFields;
+  try {
+    keepOpenFields = normalizeKeepOpenFields(raw, previousRecord ?? {});
+  } catch (error) {
+    throw new HttpError(400, error.message);
   }
 
   let proxy = null;
   let proxyPasswordEnc = null;
   if (proxyMode === 'custom') {
-    const proxyValue = raw.proxy ?? existing?.proxy ?? '';
+    const proxyValue = raw.proxy ?? sourceRecord?.proxy ?? '';
     if (typeof proxyValue !== 'string' || !proxyValue.trim()) {
       throw new HttpError(400, '指定代理时必须填写代理地址。');
     }
-    const reuseExistingProxyFields = raw.proxy === undefined && Boolean(existing);
+    const reuseExistingProxyFields = raw.proxy === undefined && Boolean(sourceRecord);
     const proxyUsername =
-      raw.proxyUsername ?? (reuseExistingProxyFields ? existing.proxyUsername ?? '' : '');
+      raw.proxyUsername ?? (reuseExistingProxyFields ? sourceRecord.proxyUsername ?? '' : '');
     const proxyBypass =
-      raw.proxyBypass ?? (reuseExistingProxyFields ? existing.proxyBypass ?? '' : '');
+      raw.proxyBypass ?? (reuseExistingProxyFields ? sourceRecord.proxyBypass ?? '' : '');
     try {
       proxy = normalizeProxy(proxyValue, 'proxy', {
         username: proxyUsername,
@@ -1445,7 +1390,17 @@ function buildManagedTarget(
         expect,
         account,
         loginSuccessSelector,
+        ...(wakeWaitSec !== undefined ? { wakeWaitSec } : {}),
+        ...(timeoutSec !== undefined ? { timeoutSec } : {}),
+        ...(settleSec !== undefined ? { settleSec } : {}),
+        ...(retries !== undefined ? { retries } : {}),
         proxyMode,
+        ...scheduleFields,
+        ...keepOpenFields,
+        firstVisitWindowKey:
+          existing && existing.url === urlValue.trim()
+            ? existing.firstVisitWindowKey ?? null
+            : null,
         ...(proxyMode === 'custom'
           ? {
               proxy: proxy.server,
@@ -1503,6 +1458,10 @@ function buildManagedTarget(
     url: target.url,
     intervalMin: Math.round(target.intervalMs / MINUTE),
     jitterMin: Math.round(target.jitterMs / MINUTE),
+    wakeWaitSec: Math.round(target.wakeWaitMs / 1000),
+    timeoutSec: Math.round(target.timeoutMs / 1000),
+    settleSec: Math.round(target.settleMs / 1000),
+    retries: target.retries,
     expect: target.expectText,
     ...(target.loginSuccessSelector
       ? { loginSuccessSelector: target.loginSuccessSelector }
@@ -1520,6 +1479,18 @@ function buildManagedTarget(
         ? { proxy: '' }
         : {}),
     ...(proxyPasswordEnc ? { proxyPasswordEnc } : {}),
+    scheduleEnabled: target.scheduleEnabled,
+    scheduleStart: target.scheduleStart,
+    scheduleEnd: target.scheduleEnd,
+    scheduleDays: target.scheduleDays,
+    ...(target.scheduleTimezone ? { scheduleTimezone: target.scheduleTimezone } : {}),
+    firstVisitWakeWaitSec: target.firstVisitWakeWaitSec,
+    firstVisitTimeoutSec: target.firstVisitTimeoutSec,
+    firstVisitRetries: target.firstVisitRetries,
+    keepOpenEnabled: target.keepOpenEnabled,
+    keepOpenScheduled: target.keepOpenScheduled,
+    keepOpenStart: target.keepOpenStart,
+    keepOpenEnd: target.keepOpenEnd,
     createdAt: target.managedCreatedAt,
     updatedAt: target.managedUpdatedAt,
   };
@@ -1546,6 +1517,24 @@ function normalizeManagedRecord(raw, globals, index, knownIds) {
   }
 }
 
+function parseBlockResourceTypes(raw) {
+  const entries = String(raw ?? '')
+    .split(/[\s,;]+/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  const out = [];
+  for (const entry of entries) {
+    if (entry === 'none') continue;
+    if (!BLOCKABLE_RESOURCE_TYPES.has(entry)) {
+      throw new Error(
+        `BLOCK_RESOURCES contains an unsupported resource type: ${entry} (allowed: ${[...BLOCKABLE_RESOURCE_TYPES].join(', ')})`,
+      );
+    }
+    if (!out.includes(entry)) out.push(entry);
+  }
+  return out;
+}
+
 function loadConfig() {
   const args = parseArgs(process.argv.slice(2));
   // Target URLs are added through the management console and persisted in
@@ -1566,6 +1555,16 @@ function loadConfig() {
   const trustedProxyCidrs = parseTrustedProxyCidrs(trustedProxyCidrsRaw);
   if (trustProxy && trustedProxyCidrsRaw.trim() === '') {
     throw new Error('TRUST_PROXY=true requires TRUST_PROXY_CIDRS.');
+  }
+
+  const scheduleTimeZoneRaw = String(
+    args['schedule-timezone'] ?? process.env.SCHEDULE_TIMEZONE ?? DEFAULT_SCHEDULE_TIMEZONE,
+  ).trim();
+  let scheduleTimeZone;
+  try {
+    scheduleTimeZone = assertValidTimeZone(scheduleTimeZoneRaw, 'SCHEDULE_TIMEZONE');
+  } catch (error) {
+    throw new Error(`配置错误: ${error.message}`);
   }
   const sessionIdleTimeoutMs =
     (toNumber(
@@ -1589,12 +1588,14 @@ function loadConfig() {
       process.env.TARGET_SECRET_KEY_FILE ??
       path.join('data', 'target-secrets.key'),
   );
+  const probeUrl = args.probe ? String(args.probe).trim() : null;
+  if (probeUrl === '') throw new Error('--probe requires a URL, e.g. --probe=https://app.example.com');
   if (configPath && urlArg) {
     throw new Error('Use either --config (many apps) or --url (one app), not both.');
   }
-  if (!configPath && !urlArg && !port) {
+  if (!configPath && !urlArg && !port && !probeUrl) {
     throw new Error(
-      'Provide --config=<file>, --url=<app>, or --port=<port> to start the web management console.',
+      'Provide --config=<file>, --url=<app>, --port=<port>, or --probe=<url>.',
     );
   }
   if (port && !adminPassword && !existsSync(adminPasswordFile)) {
@@ -1633,8 +1634,8 @@ function loadConfig() {
     }) ?? 60,
     wakeWaitSec: toNumber(args['wake-wait-sec'] ?? process.env.WAKE_WAIT_SEC ?? fileDefaults.wakeWaitSec, 'wakeWaitSec', {
       min: 5,
-      max: 180,
-    }) ?? 45,
+      max: 300,
+    }) ?? 30,
     settleSec: toNumber(args['settle-sec'] ?? process.env.SETTLE_SEC ?? fileDefaults.settleSec, 'settleSec', {
       min: 0,
       max: 60,
@@ -1642,6 +1643,7 @@ function loadConfig() {
     retries: toNumber(args.retries ?? process.env.RETRIES ?? fileDefaults.retries, 'retries', { min: 0, max: 5 }) ?? 2,
     expectText: String(args.expect ?? process.env.EXPECT_TEXT ?? fileDefaults.expect ?? ''),
     notReadyPatterns: DEFAULT_NOT_READY_PATTERNS.slice(),
+    scheduleTimeZone,
   };
   validateVisitWindow(globals.intervalMin, globals.jitterMin);
 
@@ -1682,7 +1684,7 @@ function loadConfig() {
   if (once && targets.length === 0) {
     throw new Error('At least one target is required in --once mode.');
   }
-  if (targets.length === 0 && !port) {
+  if (targets.length === 0 && !port && !probeUrl) {
     throw new Error(
       'No targets are configured. Set PORT to start the web console and add targets there.',
     );
@@ -1692,9 +1694,48 @@ function loadConfig() {
   const runtimeStateFile = path.resolve(
     args['runtime-state-file'] ?? process.env.RUNTIME_STATE_FILE ?? path.join('data', 'runtime-state.json'),
   );
+  const statsFile = path.resolve(
+    args['stats-file'] ?? process.env.STATS_FILE ?? path.join('data', 'stats.json'),
+  );
+  const webhookUrl = String(args['webhook-url'] ?? process.env.WEBHOOK_URL ?? '').trim();
+  if (webhookUrl) {
+    let parsedWebhook;
+    try {
+      parsedWebhook = new URL(webhookUrl);
+    } catch {
+      throw new Error('WEBHOOK_URL is not a valid URL.');
+    }
+    if (!['http:', 'https:'].includes(parsedWebhook.protocol)) {
+      throw new Error('WEBHOOK_URL must use http:// or https://.');
+    }
+  }
+  const webhookMinIntervalMs =
+    (toNumber(
+      args['webhook-min-interval-sec'] ?? process.env.WEBHOOK_MIN_INTERVAL_SEC,
+      'webhookMinIntervalSec',
+      { min: 0, max: 86_400 },
+    ) ?? DEFAULT_WEBHOOK_MIN_INTERVAL_SEC) * 1000;
+  const webhookTimeoutMs =
+    (toNumber(
+      args['webhook-timeout-sec'] ?? process.env.WEBHOOK_TIMEOUT_SEC,
+      'webhookTimeoutSec',
+      { min: 1, max: 60 },
+    ) ?? DEFAULT_WEBHOOK_TIMEOUT_SEC) * 1000;
+  const webhookFailureThreshold =
+    toNumber(
+      args['webhook-failure-threshold'] ?? process.env.WEBHOOK_FAILURE_THRESHOLD,
+      'webhookFailureThreshold',
+      { min: 1, max: 20 },
+    ) ?? DEFAULT_WEBHOOK_FAILURE_THRESHOLD;
+  const publicStatus = toBool(args['public-status'] ?? process.env.PUBLIC_STATUS, false);
+  const blockResourceTypes = parseBlockResourceTypes(
+    args['block-resources'] ?? process.env.BLOCK_RESOURCES,
+  );
 
   return {
     targets,
+    scheduleTimeZone,
+    probeUrl,
     // Runtime defaults are also needed when web-managed targets are created or
     // updated after startup; keep them separate from the public config fields.
     globals,
@@ -1702,6 +1743,13 @@ function loadConfig() {
       args['max-concurrent'] ?? process.env.MAX_CONCURRENT ?? fileConfig.maxConcurrent,
       'maxConcurrent',
       { min: 1, max: 5 },
+    ) ?? 1,
+    maxKeepOpenSessions: toNumber(
+      args['max-keep-open-sessions'] ??
+        process.env.MAX_KEEP_OPEN_SESSIONS ??
+        fileConfig.maxKeepOpenSessions,
+      'maxKeepOpenSessions',
+      { min: 1, max: 10 },
     ) ?? 1,
     retryDelayMs:
       (toNumber(args['retry-delay-sec'] ?? process.env.RETRY_DELAY_SEC ?? fileDefaults.retryDelaySec, 'retryDelaySec', {
@@ -1711,6 +1759,9 @@ function loadConfig() {
     once,
     headless: toBool(args.headless ?? process.env.HEADLESS, true),
     userAgent: args['user-agent'] ?? process.env.USER_AGENT ?? DEFAULT_USER_AGENT,
+    // Only an explicit override wins; otherwise the UA is derived from the
+    // browser version actually in use so the header cannot contradict it.
+    userAgentExplicit: Boolean(args['user-agent'] ?? process.env.USER_AGENT),
     chromePath: resolveChrome(args),
     chromeNoSandbox: toBool(args['chrome-no-sandbox'] ?? process.env.CHROME_NO_SANDBOX, false),
     // Optional HTTP server so the container can be deployed as a blitz.cloud
@@ -1726,6 +1777,13 @@ function loadConfig() {
     adminPasswordFile,
     managedTargetsFile,
     managedRecords,
+    statsFile,
+    publicStatus,
+    webhookUrl,
+    webhookMinIntervalMs,
+    webhookTimeoutMs,
+    webhookFailureThreshold,
+    blockResourceTypes,
     targetUrlAllowlist: parseTargetUrlAllowlist(
       args['target-url-allowlist'] ?? process.env.TARGET_URL_ALLOWLIST ?? DEFAULT_TARGET_URL_ALLOWLIST,
     ),
@@ -1891,6 +1949,8 @@ function createRuntimeStateStore(cfg, log) {
           lastSuccessfulVisitAt: target.lastSuccessfulVisitAt ?? null,
           consecutiveFailures: Math.max(0, Number(target.consecutiveFailures) || 0),
           authFailureCount: Math.max(0, Number(target.authFailureCount) || 0),
+          firstVisitWindowKey:
+            typeof target.firstVisitWindowKey === 'string' ? target.firstVisitWindowKey : null,
           nextDue: Number.isFinite(target.nextDue) ? new Date(target.nextDue).toISOString() : null,
         },
       ]),
@@ -1943,6 +2003,10 @@ function createRuntimeStateStore(cfg, log) {
           typeof state.lastSuccessfulVisitAt === 'string' ? state.lastSuccessfulVisitAt : null;
         target.consecutiveFailures = Math.max(0, Math.trunc(Number(state.consecutiveFailures) || 0));
         target.authFailureCount = Math.max(0, Math.trunc(Number(state.authFailureCount) || 0));
+        target.firstVisitWindowKey =
+          typeof state.firstVisitWindowKey === 'string' && state.firstVisitWindowKey.length <= 128
+            ? state.firstVisitWindowKey
+            : null;
         const nextDue = Date.parse(state.nextDue ?? '');
         target.nextDue = target.paused ? null : Number.isFinite(nextDue) ? nextDue : 0;
       }
@@ -1959,7 +2023,10 @@ function createRuntimeStateStore(cfg, log) {
   };
 }
 
-function classify(target, state, { requireExpect = true } = {}) {
+function classify(target, state, { requireExpect = true, status = null } = {}) {
+  if (status === 503 || status === 502 || status === 504) {
+    return { awake: false, reason: `not-ready:http-${status}` };
+  }
   if (state.ready !== 'complete') return { awake: false, reason: 'loading' };
   if (!state.text) return { awake: false, reason: 'empty-page' };
   for (const pattern of target.notReadyPatterns) {
@@ -1984,24 +2051,69 @@ async function readPageState(page) {
  * destroys the JS execution context. Poll instead of waiting on a single
  * evaluate() call.
  */
-async function waitForApp(target, page, { requireExpect = true } = {}) {
-  const deadline = Date.now() + target.wakeWaitMs;
+async function waitForApp(
+  target,
+  page,
+  {
+    requireExpect = true,
+    wakeWaitMs = target.wakeWaitMs,
+    initialStatus = null,
+    timeoutMs = target.timeoutMs,
+  } = {},
+) {
+  const deadline = Date.now() + wakeWaitMs;
+  let currentStatus = initialStatus;
   let state = { title: '', text: '', ready: 'loading' };
   let verdict = { awake: false, reason: 'loading' };
+  let lastReloadAt = Date.now();
   for (;;) {
     try {
       state = await readPageState(page);
-      verdict = classify(target, state, { requireExpect });
+      verdict = classify(target, state, { requireExpect, status: currentStatus });
     } catch (error) {
       // Navigation in progress (wake page reloading itself): retry.
       state = { ...state, ready: 'loading' };
       verdict = { awake: false, reason: `navigating:${error.message.slice(0, 80)}` };
     }
-    if (verdict.awake) return { ...verdict, ...state };
+    if (verdict.awake) return { ...verdict, ...state, status: currentStatus };
     if (Date.now() >= deadline) {
-      return { ...verdict, ...state, reason: verdict.reason || 'not-ready-timeout' };
+      // "loading"/"navigating:*" only describe why the last poll failed; after
+      // the wake window expires the actionable reason is that the app never
+      // became ready.
+      const timedOut =
+        !verdict.reason ||
+        verdict.reason === 'loading' ||
+        verdict.reason.startsWith('navigating:');
+      return {
+        ...verdict,
+        ...state,
+        status: currentStatus,
+        reason: timedOut ? 'not-ready-timeout' : verdict.reason,
+      };
     }
-    await sleep(2000);
+
+    const isWaking =
+      currentStatus === 503 ||
+      currentStatus === 502 ||
+      currentStatus === 504 ||
+      verdict.reason.startsWith('not-ready:');
+
+    if (isWaking && Date.now() - lastReloadAt >= 4_000) {
+      lastReloadAt = Date.now();
+      try {
+        const reloadResponse = await page.reload({
+          waitUntil: 'domcontentloaded',
+          timeout: Math.min(timeoutMs, 15_000),
+        });
+        if (reloadResponse) {
+          currentStatus = reloadResponse.status();
+        }
+      } catch {
+        // Reload failed or in progress; poll again on next iteration
+      }
+    } else {
+      await sleep(2000);
+    }
   }
 }
 
@@ -2121,7 +2233,7 @@ async function findSubmitControl(passwordField) {
   return element;
 }
 
-async function attemptTargetLogin(target, page, loginState) {
+async function attemptTargetLogin(target, page, loginState, { timeoutMs = target.timeoutMs } = {}) {
   let lastError = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const found = await findVisiblePasswordField(page);
@@ -2146,7 +2258,7 @@ async function attemptTargetLogin(target, page, loginState) {
       const navigation = page
         .waitForNavigation({
           waitUntil: 'domcontentloaded',
-          timeout: Math.min(target.timeoutMs, 5_000),
+          timeout: Math.min(timeoutMs, 5_000),
         })
         .catch(() => null);
       try {
@@ -2156,9 +2268,9 @@ async function attemptTargetLogin(target, page, loginState) {
         await submitControl?.dispose().catch(() => {});
       }
       // SPA logins may not navigate. The caller polls the final page state next.
-      await Promise.race([navigation, sleep(1_500)]);
+      const navigationResponse = await Promise.race([navigation, sleep(1_500)]);
       loginState.loginSubmitted = true;
-      return;
+      return navigationResponse?.status?.() ?? null;
     } catch (error) {
       lastError = error;
       await clearPasswordFields(page);
@@ -2171,10 +2283,23 @@ async function attemptTargetLogin(target, page, loginState) {
   throw new LoginFlowError('login-form-missing', '未找到可用的目标登录密码框。');
 }
 
-async function waitForLoginSuccess(target, page, loginState) {
-  const deadline = Date.now() + target.wakeWaitMs;
+async function waitForLoginSuccess(
+  target,
+  page,
+  loginState,
+  { wakeWaitMs = target.wakeWaitMs, initialStatus = null } = {},
+) {
+  const deadline = Date.now() + wakeWaitMs;
   let state = { title: '', text: '', ready: 'loading' };
   let passwordField = null;
+  if ([502, 503, 504].includes(initialStatus)) {
+    return {
+      ok: false,
+      state,
+      reason: `not-ready:http-${initialStatus}`,
+      status: initialStatus,
+    };
+  }
   for (;;) {
     try {
       state = await readPageState(page);
@@ -2184,15 +2309,17 @@ async function waitForLoginSuccess(target, page, loginState) {
     passwordField = await findVisiblePasswordField(page).catch(() => null);
     const selectorOk = await selectorVisible(page, target.loginSuccessSelector);
     const expectOk = !target.expectText || state.text.includes(target.expectText);
-    if (!passwordField && selectorOk && expectOk) {
+    const notReady = target.notReadyPatterns.some((pattern) => pattern.test(state.text));
+    if (!passwordField && state.ready === 'complete' && selectorOk && expectOk && !notReady) {
       loginState.loginVerified = true;
-      return { ok: true, state };
+      return { ok: true, state, status: initialStatus };
     }
     if (Date.now() >= deadline) {
       return {
         ok: false,
         state,
         reason: passwordField ? 'auth-failed' : 'not-ready',
+        status: initialStatus,
       };
     }
     await sleep(1_000);
@@ -2215,7 +2342,7 @@ async function dumpFailure(cfg, target, page, tag) {
   const written = {};
   try {
     const html = await page.content();
-    await appendFile(path.join(dir, htmlName), html, 'utf8');
+    await writeFile(path.join(dir, htmlName), html, 'utf8');
     written.html = htmlName;
   } catch {
     // Page may be mid-navigation; a missing dump must not fail the cycle.
@@ -2261,8 +2388,207 @@ async function cleanupFailureDumps(cfg) {
   );
 }
 
-async function visitOnce(cfg, target) {
+async function configureTargetPage(cfg, target, page, { timeoutMs = target.timeoutMs } = {}) {
+  const userAgent = cfg.userAgentExplicit ? cfg.userAgent : await userAgentForPage(page);
+  await page.setUserAgent(userAgent);
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  if (target.proxy?.username) {
+    await page.authenticate({
+      username: target.proxy.username,
+      password: target.proxy.password,
+    });
+  }
+  page.setDefaultTimeout(timeoutMs);
+  page.setDefaultNavigationTimeout(timeoutMs);
+  await page.setRequestInterception(true);
+  page.on('request', (request) => {
+    void (async () => {
+      if (request.isInterceptResolutionHandled()) return;
+      try {
+        const requestUrl = new URL(request.url());
+        if (['data:', 'blob:', 'about:'].includes(requestUrl.protocol)) {
+          await request.continue();
+          return;
+        }
+        if (!['http:', 'https:'].includes(requestUrl.protocol)) {
+          await request.abort('blockedbyclient');
+          return;
+        }
+        if (
+          Array.isArray(cfg.blockResourceTypes) &&
+          cfg.blockResourceTypes.includes(request.resourceType())
+        ) {
+          await request.abort('blockedbyclient');
+          return;
+        }
+        const enforceAllowlist =
+          cfg.targetUrlStrictSubresources ||
+          (request.isNavigationRequest() && request.frame() === page.mainFrame());
+        await validateTargetUrl(request.url(), cfg, { enforceAllowlist });
+        await request.continue();
+      } catch {
+        await request.abort('blockedbyclient').catch(() => {});
+      }
+    })();
+  });
+}
+
+async function loadTargetPage(
+  cfg,
+  target,
+  page,
+  {
+    timeoutMs = target.timeoutMs,
+    wakeWaitMs = target.wakeWaitMs,
+    loginState = createLoginVisitState(target),
+    dumpOnFailure = true,
+  } = {},
+) {
+  let response;
+  try {
+    response = await page.goto(target.url, {
+      waitUntil: 'domcontentloaded',
+      timeout: timeoutMs,
+    });
+  } catch (error) {
+    const described = describeVisitError(error);
+    return {
+      ok: false,
+      page,
+      reason: described.reason,
+      status: null,
+      title: '',
+      url: page.url(),
+      ...loginState,
+    };
+  }
+
+  if (response?.status() === 407) {
+    const dump = dumpOnFailure ? await dumpFailure(cfg, target, page, 'proxy-auth') : {};
+    return {
+      ok: false,
+      page,
+      reason: 'proxy-auth-rejected',
+      status: 407,
+      title: '',
+      url: page.url(),
+      ...loginState,
+      ...dump,
+    };
+  }
+
+  let state;
+  let loginNavigationStatus = null;
+  if (target.loginPassword) {
+    state = await waitForApp(target, page, {
+      requireExpect: false,
+      wakeWaitMs,
+      initialStatus: response?.status() ?? null,
+      timeoutMs,
+    });
+    if (!state.awake) {
+      const dump = dumpOnFailure ? await dumpFailure(cfg, target, page, 'not-ready') : {};
+      return {
+        ok: false,
+        page,
+        reason: state.reason,
+        status: state.status ?? response?.status() ?? null,
+        title: state.title,
+        url: page.url(),
+        ...loginState,
+        ...dump,
+      };
+    }
+    try {
+      loginNavigationStatus = await attemptTargetLogin(target, page, loginState, { timeoutMs });
+    } catch (error) {
+      const reason = error instanceof LoginFlowError ? error.code : 'login-submit-failed';
+      await clearPasswordFields(page);
+      const dump = dumpOnFailure ? await dumpFailure(cfg, target, page, reason) : {};
+      return {
+        ok: false,
+        page,
+        reason,
+        status: response?.status() ?? null,
+        title: '',
+        url: page.url(),
+        ...loginState,
+        ...dump,
+      };
+    }
+
+    const loginResult = await waitForLoginSuccess(target, page, loginState, {
+      wakeWaitMs,
+      initialStatus: loginNavigationStatus,
+    });
+    if (!loginResult.ok) {
+      await clearPasswordFields(page);
+      const dump = dumpOnFailure ? await dumpFailure(cfg, target, page, 'login-verify') : {};
+      return {
+        ok: false,
+        page,
+        reason: loginResult.reason,
+        status: loginResult.status ?? loginNavigationStatus ?? response?.status() ?? null,
+        title: loginResult.state.title,
+        url: page.url(),
+        ...loginState,
+        ...dump,
+      };
+    }
+  }
+
+  state = await waitForApp(target, page, {
+    wakeWaitMs,
+    initialStatus: loginNavigationStatus ?? state?.status ?? response?.status() ?? null,
+    timeoutMs,
+  });
+  if (!state.awake) {
+    const dump = dumpOnFailure ? await dumpFailure(cfg, target, page, 'not-ready') : {};
+    return {
+      ok: false,
+      page,
+      reason: state.reason,
+      status: state.status ?? response?.status() ?? null,
+      title: state.title,
+      url: page.url(),
+      ...loginState,
+      ...dump,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: 'ready',
+    page,
+    status: state.status ?? response?.status() ?? null,
+    title: state.title,
+    url: page.url(),
+    state,
+    ...loginState,
+  };
+}
+
+async function openTargetPage(cfg, target, browser, options = {}) {
   await validateTargetUrl(target.url, cfg);
+  let page = null;
+  try {
+    page = await browser.newPage();
+    await configureTargetPage(cfg, target, page, options);
+    return await loadTargetPage(cfg, target, page, options);
+  } catch (error) {
+    const described = describeVisitError(error);
+    return {
+      ok: false,
+      page,
+      reason: described.reason,
+      status: null,
+      title: '',
+      url: page?.url?.() ?? target.url,
+      ...createLoginVisitState(target),
+    };
+  }
+}
+function browserLaunchArgs(cfg, target) {
   const args = [
     '--disable-dev-shm-usage',
     '--disable-gpu',
@@ -2289,6 +2615,132 @@ async function visitOnce(cfg, target) {
     // direct and inherit-without-global-proxy must not fall back to system/env proxy.
     args.push('--no-proxy-server');
   }
+  return args;
+}
+
+/**
+ * Opens a target once and reports what the browser actually saw. Used by
+ * `--probe` and by the management console's "test connection" button, so it
+ * must never touch runtime state, scheduling or the statistics store.
+ */
+async function probeTarget(cfg, target, { timeoutMs, wakeWaitMs, deadlineMs } = {}) {
+  await validateTargetUrl(target.url, cfg);
+  const startedAt = Date.now();
+  const effectiveTimeout = timeoutMs ?? Math.min(target.timeoutMs, 30_000);
+  // A probe is an interactive diagnostic; never block an HTTP request for the
+  // full first-visit wake window (up to 300s).
+  const effectiveWakeWait = wakeWaitMs ?? Math.min(target.wakeWaitMs, 60_000);
+  const budgetMs = Math.max(
+    PROBE_DEADLINE_FLOOR_MS,
+    Math.min(
+      PROBE_DEADLINE_CEILING_MS,
+      effectiveTimeout + effectiveWakeWait + PROBE_DEADLINE_SLACK_MS,
+    ),
+  );
+  const requestedDeadline = Number(deadlineMs);
+  const deadlineAt = startedAt + (requestedDeadline > 0 ? requestedDeadline : budgetMs);
+
+  const browser = await puppeteer.launch({
+    executablePath: cfg.chromePath,
+    headless: cfg.headless,
+    defaultViewport: { width: 1366, height: 900 },
+    args: browserLaunchArgs(cfg, target),
+  });
+  ACTIVE_BROWSERS.add(browser);
+
+  let watchdog = null;
+  try {
+    const steps = (async () => {
+      const page = await browser.newPage();
+      await configureTargetPage(cfg, target, page, { timeoutMs: effectiveTimeout });
+      const opened = await loadTargetPage(cfg, target, page, {
+        timeoutMs: effectiveTimeout,
+        wakeWaitMs: effectiveWakeWait,
+        dumpOnFailure: false,
+      });
+      let state = opened.state;
+      if (!state) {
+        state = await readPageState(page).catch(() => ({ title: '', text: '', ready: 'unknown' }));
+      }
+      const text = typeof state.text === 'string' ? state.text : '';
+      const matchedNotReadyPatterns = (target.notReadyPatterns ?? [])
+        .filter((pattern) => pattern.test(text))
+        .map((pattern) => pattern.source);
+      const passwordField = await findVisiblePasswordField(page).catch(() => null);
+      if (passwordField?.field) await passwordField.field.dispose().catch(() => {});
+      return {
+        ok: Boolean(opened.ok),
+        reason: opened.reason ?? 'ready',
+        httpStatus: opened.status ?? null,
+        title: state.title ?? '',
+        readyState: state.ready ?? null,
+        finalUrl: page.url(),
+        ms: Date.now() - startedAt,
+        matchedNotReadyPatterns,
+        expectTextConfigured: Boolean(target.expectText),
+        expectTextFound: target.expectText ? text.includes(target.expectText) : null,
+        passwordFieldFound: Boolean(passwordField),
+        loginPasswordConfigured: Boolean(target.loginPassword),
+        textPreview: text.slice(0, 300),
+        proxy: redactProxy(target.proxy),
+      };
+    })();
+    // The watchdog wins the race when the browser stops answering. Keep a
+    // handler on the losing promise so its late rejection is never reported as
+    // an unhandled rejection once the browser is closed underneath it.
+    void steps.catch(() => {});
+
+    return await Promise.race([
+      steps,
+      new Promise((_resolve, reject) => {
+        watchdog = setTimeout(() => {
+          const error = new Error(
+            `探测超时：${Math.round((Date.now() - startedAt) / 1000)} 秒内未完成，页面或浏览器无响应。`,
+          );
+          error.code = 'probe-timeout';
+          reject(error);
+        }, Math.max(0, deadlineAt - Date.now()));
+        watchdog.unref?.();
+      }),
+    ]);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    await closeBrowser(browser);
+  }
+}
+
+async function runProbeCli(cfg) {
+  let target;
+  try {
+    target = normalizeTarget({ id: 'probe', url: cfg.probeUrl }, cfg.globals, 0);
+  } catch (error) {
+    console.log(JSON.stringify({ ok: false, error: error.message }, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    const result = await probeTarget(cfg, target);
+    console.log(JSON.stringify(result, null, 2));
+    process.exitCode = result.ok ? 0 : 1;
+  } catch (error) {
+    console.log(
+      JSON.stringify(
+        { ok: false, error: String(error?.message ?? error).slice(0, 300) },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 1;
+  }
+}
+
+async function visitOnce(
+  cfg,
+  target,
+  { timeoutMs = target.timeoutMs, wakeWaitMs = target.wakeWaitMs } = {},
+) {
+  await validateTargetUrl(target.url, cfg);
+  const args = browserLaunchArgs(cfg, target);
 
   const browser = await puppeteer.launch({
     executablePath: cfg.chromePath,
@@ -2298,126 +2750,18 @@ async function visitOnce(cfg, target) {
   });
   ACTIVE_BROWSERS.add(browser);
 
-  const loginState = createLoginVisitState(target);
   try {
-    const page = await browser.newPage();
-    await page.setUserAgent(cfg.userAgent);
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-    if (target.proxy?.username) {
-      await page.authenticate({
-        username: target.proxy.username,
-        password: target.proxy.password,
-      });
-    }
-    page.setDefaultTimeout(target.timeoutMs);
-    page.setDefaultNavigationTimeout(target.timeoutMs);
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      void (async () => {
-        if (request.isInterceptResolutionHandled()) return;
-        try {
-          const requestUrl = new URL(request.url());
-          if (['data:', 'blob:', 'about:'].includes(requestUrl.protocol)) {
-            await request.continue();
-            return;
-          }
-          if (!['http:', 'https:'].includes(requestUrl.protocol)) {
-            await request.abort('blockedbyclient');
-            return;
-          }
-          const enforceAllowlist =
-            cfg.targetUrlStrictSubresources ||
-            (request.isNavigationRequest() && request.frame() === page.mainFrame());
-          await validateTargetUrl(request.url(), cfg, { enforceAllowlist });
-          await request.continue();
-        } catch {
-          await request.abort('blockedbyclient').catch(() => {});
-        }
-      })();
+    const opened = await openTargetPage(cfg, target, browser, {
+      timeoutMs,
+      wakeWaitMs,
+      dumpOnFailure: true,
     });
-
-    const response = await page.goto(target.url, {
-      waitUntil: 'domcontentloaded',
-      timeout: target.timeoutMs,
-    });
-    // A 407 means the proxy rejected (or never received) the credentials; no
-    // point waiting for the wake page in that case.
-    if (response?.status() === 407) {
-      const dump = await dumpFailure(cfg, target, page, 'proxy-auth');
-      return {
-        ok: false,
-        reason: 'proxy-auth-rejected',
-        status: 407,
-        title: '',
-        url: page.url(),
-        ...dump,
-      };
-    }
-    let state;
-    if (target.loginPassword) {
-      // Do not require the post-login expect text yet: the first stable page is
-      // often the target app's own password gate.
-      state = await waitForApp(target, page, { requireExpect: false });
-      if (!state.awake) {
-        const dump = await dumpFailure(cfg, target, page, 'not-ready');
-        return {
-          ok: false,
-          reason: state.reason,
-          status: response?.status() ?? null,
-          title: state.title,
-          url: page.url(),
-          ...loginState,
-          ...dump,
-        };
-      }
-      try {
-        await attemptTargetLogin(target, page, loginState);
-      } catch (error) {
-        const reason =
-          error instanceof LoginFlowError ? error.code : 'login-submit-failed';
-        await clearPasswordFields(page);
-        const dump = await dumpFailure(cfg, target, page, reason);
-        return {
-          ok: false,
-          reason,
-          status: response?.status() ?? null,
-          title: '',
-          url: page.url(),
-          ...loginState,
-          ...dump,
-        };
-      }
-
-      const loginResult = await waitForLoginSuccess(target, page, loginState);
-      if (!loginResult.ok) {
-        await clearPasswordFields(page);
-        const dump = await dumpFailure(cfg, target, page, 'login-verify');
-        return {
-          ok: false,
-          reason: loginResult.reason,
-          status: response?.status() ?? null,
-          title: loginResult.state.title,
-          url: page.url(),
-          ...loginState,
-          ...dump,
-        };
-      }
+    if (!opened.ok) {
+      const { page: _page, ...result } = opened;
+      return result;
     }
 
-    state = await waitForApp(target, page);
-    if (!state.awake) {
-      const dump = await dumpFailure(cfg, target, page, 'not-ready');
-      return {
-        ok: false,
-        reason: state.reason,
-        status: response?.status() ?? null,
-        title: state.title,
-        url: page.url(),
-        ...loginState,
-        ...dump,
-      };
-    }
-
+    const page = opened.page;
     // Behave like a short human visit: give the app time to finish booting and
     // touch the page once, without inflating memory on the blitz side.
     const viewport = page.viewport() ?? { width: 1366, height: 900 };
@@ -2433,19 +2777,12 @@ async function visitOnce(cfg, target) {
       .catch(() => {});
     await waitForStop(target.settleMs);
 
-    return {
-      ok: true,
-      status: response?.status() ?? null,
-      title: state.title,
-      url: page.url(),
-      ...loginState,
-    };
+    const { page: _page, state: _state, ...result } = opened;
+    return result;
   } finally {
-    ACTIVE_BROWSERS.delete(browser);
-    await browser.close().catch(() => {});
+    await closeBrowser(browser);
   }
 }
-
 function createStatus(cfg) {
   return {
     startedAt: new Date().toISOString(),
@@ -2461,7 +2798,7 @@ function createStatus(cfg) {
   };
 }
 
-function recordVisit(status, target, result) {
+function recordVisit(status, target, result, { ms = 0 } = {}) {
   status.visits += 1;
   status.lastVisitAt = new Date().toISOString();
   status.lastVisitOk = Boolean(result.ok);
@@ -2472,6 +2809,17 @@ function recordVisit(status, target, result) {
     status.failures += 1;
     status.lastError = String(result.reason ?? 'unknown').slice(0, 200);
   }
+  const durationSec = Math.max(0, Number(ms) || 0) / 1000;
+  target.durationCount = (target.durationCount ?? 0) + 1;
+  target.durationSum = (target.durationSum ?? 0) + durationSec;
+  target.durationBuckets ??= VISIT_DURATION_BUCKETS_SEC.map(() => 0);
+  for (let index = 0; index < VISIT_DURATION_BUCKETS_SEC.length; index += 1) {
+    if (durationSec <= VISIT_DURATION_BUCKETS_SEC[index]) {
+      target.durationBuckets[index] += 1;
+      break;
+    }
+  }
+  statsStore?.recordVisit({ ok: Boolean(result.ok), ms });
 }
 
 function sendJson(res, statusCode, body, extraHeaders = {}) {
@@ -2860,7 +3208,12 @@ function publicVisit(visit) {
   };
 }
 
-function targetReadinessIssues(target, now = Date.now()) {
+function targetReadinessIssues(
+  target,
+  now = Date.now(),
+  timeZone = DEFAULT_SCHEDULE_TIMEZONE,
+  keepOpenManager = null,
+) {
   if (target.paused) return [];
 
   const issues = [];
@@ -2869,32 +3222,60 @@ function targetReadinessIssues(target, now = Date.now()) {
     issues.push('consecutive-failures');
   }
 
-  const nextDue = Number(target.nextDue);
-  if (
-    !target.running &&
-    !target.schedulerQueued &&
-    Number.isFinite(nextDue) &&
-    nextDue > 0 &&
-    now - nextDue > READINESS_GRACE_MS
-  ) {
-    issues.push('schedule-overdue');
-  }
+  const scheduleState = getScheduleState(target, now, timeZone);
+  const keepOpenActive =
+    keepOpenManager?.isSessionActive(target.id) === true || target.keepOpenActive === true;
+  if (!scheduleState.scheduledOff && !keepOpenActive) {
+    const nextDue = Number(target.nextDue);
+    if (
+      !target.running &&
+      !target.schedulerQueued &&
+      Number.isFinite(nextDue) &&
+      nextDue > 0 &&
+      now - nextDue > READINESS_GRACE_MS
+    ) {
+      issues.push('schedule-overdue');
+    }
 
-  const lastSuccessfulVisitAt = Date.parse(target.lastSuccessfulVisitAt ?? '');
-  if (
-    Number.isFinite(lastSuccessfulVisitAt) &&
-    now - lastSuccessfulVisitAt >
-      target.intervalMs * FAILURE_BACKOFF_MAX_MULTIPLIER + target.jitterMs + READINESS_GRACE_MS
-  ) {
-    issues.push('stale-success');
+    const lastSuccessfulVisitAt = Date.parse(target.lastSuccessfulVisitAt ?? '');
+    // Wall-clock staleness is misleading inside a narrow daily window: at 09:00
+    // the last success is legitimately yesterday's, so a target that only runs
+    // 09:00-10:00 would look stale for the first minutes of every window. The
+    // window start restarts the clock and gives the target a full budget.
+    const windowStartMs = Number(scheduleState.windowStartMs);
+    const freshnessBaseline = Math.max(
+      Number.isFinite(lastSuccessfulVisitAt) ? lastSuccessfulVisitAt : 0,
+      Number.isFinite(windowStartMs) ? windowStartMs : 0,
+    );
+    if (
+      freshnessBaseline > 0 &&
+      now - freshnessBaseline >
+        target.intervalMs * FAILURE_BACKOFF_MAX_MULTIPLIER +
+          target.jitterMs +
+          READINESS_GRACE_MS
+    ) {
+      issues.push('stale-success');
+    }
   }
   return issues;
 }
 
-function buildReadinessPayload(cfg, now = Date.now()) {
-  const activeTargets = cfg.targets.filter((target) => !target.paused);
+function buildReadinessPayload(cfg, now = Date.now(), keepOpenManager = null) {
+  const activeTargets = cfg.targets.filter(
+    (target) =>
+      !target.paused &&
+      !getScheduleState(target, now, cfg.scheduleTimeZone).scheduledOff,
+  );
   const issues = activeTargets
-    .map((target) => ({ id: target.id, reasons: targetReadinessIssues(target, now) }))
+    .map((target) => ({
+      id: target.id,
+      reasons: targetReadinessIssues(
+        target,
+        now,
+        cfg.scheduleTimeZone,
+        keepOpenManager,
+      ),
+    }))
     .filter((target) => target.reasons.length > 0);
   const ready = issues.length === 0;
   return {
@@ -2908,8 +3289,16 @@ function buildReadinessPayload(cfg, now = Date.now()) {
   };
 }
 
-function publicTargetRuntime(target) {
-  const readinessIssues = targetReadinessIssues(target);
+function publicTargetRuntime(target, cfg = null, keepOpenManager = null) {
+  const timeZone = cfg?.scheduleTimeZone ?? DEFAULT_SCHEDULE_TIMEZONE;
+  const readinessIssues = targetReadinessIssues(
+    target,
+    Date.now(),
+    timeZone,
+    keepOpenManager,
+  );
+  const scheduleState = getScheduleState(target, Date.now(), timeZone);
+  const stayStatus = keepOpenManager?.getTargetStayStatus(target.id) ?? { active: false, durationSec: 0 };
   return {
     id: target.id,
     account: target.account,
@@ -2927,11 +3316,32 @@ function publicTargetRuntime(target) {
     running: Boolean(target.running),
     overdue: readinessIssues.includes('schedule-overdue'),
     readinessIssues,
+    wakeWaitSec: Math.round(target.wakeWaitMs / 1000),
     proxyMode: target.proxyMode ?? (target.proxy ? 'custom' : 'direct'),
     proxyUsername: target.proxyUsername || null,
     proxyBypass: target.proxy?.bypass || null,
     proxyPasswordConfigured: Boolean(target.proxyPasswordConfigured),
     proxy: redactProxy(target.proxy),
+    scheduleEnabled: Boolean(target.scheduleEnabled),
+    scheduleStart: target.scheduleStart,
+    scheduleEnd: target.scheduleEnd,
+    scheduleDays: target.scheduleDays,
+    scheduleTimezone: target.scheduleTimezone ?? null,
+    effectiveScheduleTimezone: scheduleState.timeZone ?? timeZone,
+    firstVisitWakeWaitSec: target.firstVisitWakeWaitSec,
+    firstVisitTimeoutSec: target.firstVisitTimeoutSec,
+    firstVisitRetries: target.firstVisitRetries,
+    scheduleActive: scheduleState.active,
+    scheduledOff: scheduleState.scheduledOff,
+    scheduleNextStart: scheduleState.nextStartAt,
+    firstVisitPending: scheduleState.firstVisitPending,
+    keepOpenEnabled: Boolean(target.keepOpenEnabled),
+    keepOpenScheduled: Boolean(target.keepOpenScheduled),
+    keepOpenStart: target.keepOpenStart,
+    keepOpenEnd: target.keepOpenEnd,
+    keepOpenManual: Boolean(target.keepOpenManual),
+    keepOpenActive: Boolean(stayStatus.active || target.keepOpenActive),
+    keepOpenDurationSec: stayStatus.durationSec,
   };
 }
 
@@ -2964,12 +3374,12 @@ function prometheusLabelValue(value) {
     .replace(/\n/g, '\\n');
 }
 
-function buildMetrics(cfg, status, controls) {
+function buildMetrics(cfg, status, controls, keepOpenManager = null) {
   const memory = process.memoryUsage();
   const uptimeSec = Math.max(0, Math.round((Date.now() - Date.parse(status.startedAt)) / 1000));
   const schedulerQueued = cfg.targets.filter((target) => target.schedulerQueued).length;
   const queueLength = schedulerQueued + controls.pendingCount();
-  const readiness = buildReadinessPayload(cfg);
+  const readiness = buildReadinessPayload(cfg, Date.now(), keepOpenManager);
   const lines = [
     '# HELP blitz_keepalive_up Whether the keep-alive process is running.',
     '# TYPE blitz_keepalive_up gauge',
@@ -3016,7 +3426,12 @@ function buildMetrics(cfg, status, controls) {
     const label = `target="${prometheusLabelValue(target.id)}"`;
     const lastSuccessfulAt = Date.parse(target.lastSuccessfulVisitAt ?? '');
     const nextDue = Number(target.nextDue);
-    const overdue = targetReadinessIssues(target).includes('schedule-overdue');
+    const overdue = targetReadinessIssues(
+      target,
+      Date.now(),
+      cfg.scheduleTimeZone,
+      keepOpenManager,
+    ).includes('schedule-overdue');
     lines.push(
       `blitz_keepalive_target_last_success_timestamp_seconds{${label}} ${
         Number.isFinite(lastSuccessfulAt) ? lastSuccessfulAt / 1000 : 0
@@ -3029,6 +3444,31 @@ function buildMetrics(cfg, status, controls) {
       }`,
       `blitz_keepalive_target_paused{${label}} ${target.paused ? 1 : 0}`,
       `blitz_keepalive_target_overdue{${label}} ${overdue ? 1 : 0}`,
+    );
+  }
+  lines.push(
+    '# HELP blitz_keepalive_keep_open_sessions Number of active keep-open browser sessions.',
+    '# TYPE blitz_keepalive_keep_open_sessions gauge',
+    `blitz_keepalive_keep_open_sessions ${Math.max(0, Number(keepOpenManager?.activeCount) || 0)}`,
+    '# HELP blitz_keepalive_visit_duration_seconds Target visit duration in seconds.',
+    '# TYPE blitz_keepalive_visit_duration_seconds histogram',
+  );
+  for (const target of cfg.targets) {
+    const label = `target="${prometheusLabelValue(target.id)}"`;
+    let cumulative = 0;
+    VISIT_DURATION_BUCKETS_SEC.forEach((le, index) => {
+      cumulative += Number(target.durationBuckets?.[index]) || 0;
+      lines.push(
+        `blitz_keepalive_visit_duration_seconds_bucket{${label},le="${le}"} ${cumulative}`,
+      );
+    });
+    const count = Math.max(0, Number(target.durationCount) || 0);
+    lines.push(
+      `blitz_keepalive_visit_duration_seconds_bucket{${label},le="+Inf"} ${count}`,
+      `blitz_keepalive_visit_duration_seconds_sum{${label}} ${Number(
+        target.durationSum ?? 0,
+      ).toFixed(3)}`,
+      `blitz_keepalive_visit_duration_seconds_count{${label}} ${count}`,
     );
   }
   lines.push('');
@@ -3084,7 +3524,7 @@ function createRunController(cfg) {
   };
 }
 
-function createTargetManager(cfg, status, controls) {
+function createTargetManager(cfg, status, controls, keepOpenManager = null) {
   let mutationQueue = Promise.resolve();
   const serialize = (operation) => {
     const result = mutationQueue.then(operation, operation);
@@ -3093,6 +3533,9 @@ function createTargetManager(cfg, status, controls) {
   };
   const ensureIdle = (target) => {
     if (!target) throw new HttpError(404, '目标不存在。');
+    if (keepOpenManager?.isSessionActive(target.id) || target.keepOpenActive) {
+      throw new HttpError(409, '目标正在长驻挂机，请先停止保持访问。');
+    }
     if (target.running || target.schedulerQueued || controls.hasPending(target.id)) {
       throw new HttpError(409, '目标正在巡检或已排队，请稍后再试。');
     }
@@ -3117,6 +3560,10 @@ function createTargetManager(cfg, status, controls) {
       url: record.url,
       intervalMin: record.intervalMin,
       jitterMin: record.jitterMin,
+      wakeWaitSec: record.wakeWaitSec ?? 30,
+      timeoutSec: record.timeoutSec ?? 60,
+      settleSec: record.settleSec ?? 6,
+      retries: record.retries ?? 2,
       expect: record.expect,
       ...(record.loginSuccessSelector
         ? { loginSuccessSelector: record.loginSuccessSelector }
@@ -3126,6 +3573,20 @@ function createTargetManager(cfg, status, controls) {
       ...(record.proxy !== undefined ? { proxy: record.proxy } : {}),
       ...(record.proxyUsername ? { proxyUsername: record.proxyUsername } : {}),
       ...(record.proxyBypass ? { proxyBypass: record.proxyBypass } : {}),
+      scheduleEnabled: Boolean(record.scheduleEnabled),
+      scheduleStart: record.scheduleStart ?? DEFAULT_SCHEDULE_START,
+      scheduleEnd: record.scheduleEnd ?? DEFAULT_SCHEDULE_END,
+      scheduleDays: record.scheduleDays ?? DEFAULT_SCHEDULE_DAYS.slice(),
+      ...(record.scheduleTimezone ? { scheduleTimezone: record.scheduleTimezone } : {}),
+      firstVisitWakeWaitSec:
+        record.firstVisitWakeWaitSec ?? DEFAULT_FIRST_VISIT_WAKE_WAIT_SEC,
+      firstVisitTimeoutSec:
+        record.firstVisitTimeoutSec ?? DEFAULT_FIRST_VISIT_TIMEOUT_SEC,
+      firstVisitRetries: record.firstVisitRetries ?? DEFAULT_FIRST_VISIT_RETRIES,
+      keepOpenEnabled: Boolean(record.keepOpenEnabled),
+      keepOpenScheduled: Boolean(record.keepOpenScheduled),
+      keepOpenStart: record.keepOpenStart ?? '09:00',
+      keepOpenEnd: record.keepOpenEnd ?? '18:00',
       ...(record.createdAt ? { createdAt: record.createdAt } : {}),
       ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
     };
@@ -3167,9 +3628,19 @@ function createTargetManager(cfg, status, controls) {
           const knownIds = new Set(
             cfg.targets.filter((target) => target.id !== id).map((target) => target.id),
           );
+          const requestedUrl = raw.url ?? existingRecord.url;
+          const normalizedRequestedUrl =
+            typeof requestedUrl === 'string' ? requestedUrl.trim() : requestedUrl;
+          const existingWithRuntime = {
+            ...existingRecord,
+            firstVisitWindowKey:
+              normalizedRequestedUrl === current.url
+                ? current.firstVisitWindowKey ?? null
+                : null,
+          };
           const { target, record } = buildManagedTarget(
             raw,
-            existingRecord,
+            existingWithRuntime,
             cfg.globals,
             index,
             knownIds,
@@ -3179,16 +3650,19 @@ function createTargetManager(cfg, status, controls) {
           const nextRecords = cfg.managedRecords.map((item) => (item.id === id ? record : item));
           await persist(nextRecords);
 
-          if (current.url === target.url) {
+          target.paused = current.paused;
+          target.pauseReason = current.pauseReason;
+          target.pausedUntil = current.pausedUntil;
+          const scheduleState = getScheduleState(target, Date.now(), cfg.scheduleTimeZone);
+          if (scheduleState.scheduledOff) {
+            target.nextDue = scheduleState.nextStartMs;
+          } else if (current.url === target.url && !current.paused) {
             target.nextDue = current.nextDue;
             target.lastResult = current.lastResult;
             target.lastVisit = current.lastVisit;
             target.consecutiveFailures = current.consecutiveFailures;
             target.authFailureCount = current.authFailureCount;
             target.lastSuccessfulVisitAt = current.lastSuccessfulVisitAt;
-            target.paused = current.paused;
-            target.pauseReason = current.pauseReason;
-            target.pausedUntil = current.pausedUntil;
           } else {
             target.nextDue = Date.now() + 1_000;
           }
@@ -3245,6 +3719,68 @@ function createTargetManager(cfg, status, controls) {
         } finally {
           target.managementLocked = false;
         }
+      });
+    },
+    pauseAll() {
+      return serialize(async () => {
+        const paused = [];
+        const skipped = [];
+        const stopping = [];
+        for (const target of cfg.targets) {
+          if (target.paused) {
+            paused.push(target.id);
+            continue;
+          }
+          if (
+            target.running ||
+            target.schedulerQueued ||
+            target.managementLocked ||
+            controls.hasPending(target.id)
+          ) {
+            skipped.push(target.id);
+            continue;
+          }
+          target.managementLocked = true;
+          try {
+            // Pause first: the scheduler must not pick the target up while a
+            // keep-open browser is still shutting down.
+            pauseTarget(target, '批量暂停');
+            paused.push(target.id);
+            if (keepOpenManager?.isSessionActive(target.id)) {
+              target.keepOpenManual = false;
+              stopping.push(
+                keepOpenManager.stopTargetStay(target.id, 'bulk-pause').catch(() => {}),
+              );
+            }
+          } finally {
+            target.managementLocked = false;
+          }
+        }
+        await Promise.all(stopping);
+        runtimeStateStore?.schedule();
+        return { paused, skipped };
+      });
+    },
+    resumeAll() {
+      return serialize(async () => {
+        const resumed = [];
+        const failed = [];
+        for (const target of cfg.targets) {
+          if (!target.paused) continue;
+          if (target.managementLocked) {
+            failed.push({ id: target.id, reason: '目标正在被其他管理操作修改' });
+            continue;
+          }
+          try {
+            await validateTargetUrl(target.url, cfg);
+            resumeTarget(target);
+            resumed.push(target.id);
+          } catch (error) {
+            failed.push({ id: target.id, reason: String(error?.message ?? error).slice(0, 160) });
+          }
+        }
+        runtimeStateStore?.schedule();
+        return { resumed, failed };
       });
     },
     export() {
@@ -3338,7 +3874,12 @@ function createTargetManager(cfg, status, controls) {
         const now = Date.now();
         nextTargets.forEach((target, index) => {
           const current = currentById.get(target.id);
-          if (current?.url === target.url && !current.paused) {
+          target.firstVisitWindowKey =
+            current?.url === target.url ? current.firstVisitWindowKey ?? null : null;
+          const scheduleState = getScheduleState(target, now, cfg.scheduleTimeZone);
+          if (scheduleState.scheduledOff) {
+            target.nextDue = scheduleState.nextStartMs;
+          } else if (current?.url === target.url && !current.paused) {
             target.nextDue = current.nextDue || now + 1_000;
             target.lastResult = current.lastResult;
             target.lastVisit = current.lastVisit;
@@ -3360,10 +3901,16 @@ function createTargetManager(cfg, status, controls) {
   };
 }
 
-async function buildOverview(cfg, status, log, controls, admin) {
-  const readiness = buildReadinessPayload(cfg);
+async function buildOverview(cfg, status, log, controls, admin, keepOpenManager = null) {
+  const readiness = buildReadinessPayload(cfg, Date.now(), keepOpenManager);
   const targets = cfg.targets.map((target) => {
-    const readinessIssues = targetReadinessIssues(target);
+    const readinessIssues = targetReadinessIssues(
+      target,
+      Date.now(),
+      cfg.scheduleTimeZone,
+      keepOpenManager,
+    );
+    const scheduleState = getScheduleState(target, Date.now(), cfg.scheduleTimeZone);
     return {
       id: target.id,
       source: target.source ?? 'config',
@@ -3372,6 +3919,7 @@ async function buildOverview(cfg, status, log, controls, admin) {
       url: target.url,
       intervalMin: Math.round(target.intervalMs / MINUTE),
       jitterMin: Math.round(target.jitterMs / MINUTE),
+      wakeWaitSec: Math.round(target.wakeWaitMs / 1000),
       expect: target.expectText,
       expectConfigured: Boolean(target.expectText),
       loginPasswordConfigured: Boolean(target.loginPasswordConfigured),
@@ -3395,9 +3943,31 @@ async function buildOverview(cfg, status, log, controls, admin) {
       proxyBypass: target.proxy?.bypass || null,
       proxyPasswordConfigured: Boolean(target.proxyPasswordConfigured),
       proxy: redactProxy(target.proxy),
+      scheduleEnabled: Boolean(target.scheduleEnabled),
+      scheduleStart: target.scheduleStart,
+      scheduleEnd: target.scheduleEnd,
+      scheduleDays: target.scheduleDays,
+      scheduleTimezone: target.scheduleTimezone ?? null,
+      effectiveScheduleTimezone: scheduleState.timeZone ?? cfg.scheduleTimeZone,
+      firstVisitWakeWaitSec: target.firstVisitWakeWaitSec,
+      firstVisitTimeoutSec: target.firstVisitTimeoutSec,
+      firstVisitRetries: target.firstVisitRetries,
+      scheduleActive: scheduleState.active,
+      scheduledOff: scheduleState.scheduledOff,
+      scheduleNextStart: scheduleState.nextStartAt,
+      firstVisitPending: scheduleState.firstVisitPending,
+      keepOpenEnabled: Boolean(target.keepOpenEnabled),
+      keepOpenScheduled: Boolean(target.keepOpenScheduled),
+      keepOpenStart: target.keepOpenStart,
+      keepOpenEnd: target.keepOpenEnd,
+      keepOpenManual: Boolean(target.keepOpenManual),
+      keepOpenActive: Boolean(keepOpenManager?.isSessionActive(target.id) || target.keepOpenActive),
+      keepOpenDurationSec: keepOpenManager?.getTargetStayStatus(target.id)?.durationSec ?? 0,
     };
   });
-  const failing = targets.filter((target) => target.consecutiveFailures > 0).length;
+  const failing = targets.filter(
+    (target) => target.consecutiveFailures > 0 && !target.scheduledOff,
+  ).length;
   const visited = targets.filter((target) => target.lastVisit).length;
   const pausedTargets = targets.filter((target) => target.paused).length;
   const authFailures = targets.filter((target) => target.authFailureCount > 0).length;
@@ -3426,6 +3996,7 @@ async function buildOverview(cfg, status, log, controls, admin) {
   }
   return {
     generatedAt: new Date().toISOString(),
+    scheduleTimeZone: cfg.scheduleTimeZone,
     overall,
     readiness,
     summary: {
@@ -3434,6 +4005,9 @@ async function buildOverview(cfg, status, log, controls, admin) {
       notReadyTargets: readiness.issueCount,
       overdueTargets,
       pausedTargets,
+      scheduledOffTargets: targets.filter((target) => target.scheduledOff).length,
+      firstVisitPendingTargets: targets.filter((target) => target.firstVisitPending).length,
+      keepOpenTargets: targets.filter((target) => target.keepOpenActive).length,
       authFailures,
       authFailureCount,
       visitedTargets: visited,
@@ -3451,6 +4025,7 @@ async function buildOverview(cfg, status, log, controls, admin) {
     },
     config: {
       maxConcurrent: cfg.maxConcurrent,
+      maxKeepOpenSessions: cfg.maxKeepOpenSessions,
       retryDelaySec: Math.round(cfg.retryDelayMs / 1000),
       headless: cfg.headless,
       port: cfg.port || null,
@@ -3470,13 +4045,83 @@ async function buildOverview(cfg, status, log, controls, admin) {
       managedTargetLimit: MAX_MANAGED_TARGETS,
       requireHttps: cfg.requireHttps,
       bindHost: cfg.bindHost,
+      publicStatus: Boolean(cfg.publicStatus),
+      webhookEnabled: Boolean(cfg.webhookUrl),
+      blockResourceTypes: cfg.blockResourceTypes ?? [],
     },
+    stats: statsStore?.snapshot(7) ?? null,
     targets,
     logs: log.snapshot(40).map(publicLogEntry),
   };
 }
 
-async function handleRequest(req, res, cfg, status, log, controls, admin, targetManager) {
+/**
+ * Read-only view for people who should see whether the apps are awake but must
+ * not see URLs, proxies, credentials or logs.
+ */
+/**
+ * The public status page is anonymous when PUBLIC_STATUS=true, so account
+ * identifiers must not be readable there: an email like alice@corp.com is
+ * enough to fingerprint the operator's tenancy. Keep enough shape to tell
+ * targets apart without disclosing the login.
+ */
+function maskAccount(account) {
+  const value = String(account ?? '').trim();
+  if (!value) return null;
+  const at = value.indexOf('@');
+  if (at > 0) return `${value.slice(0, 1)}***${value.slice(at)}`;
+  if (value.length <= 2) return '***';
+  return `***${value.slice(-2)}`;
+}
+
+function buildPublicStatus(cfg, status, keepOpenManager = null) {
+  const now = Date.now();
+  const readiness = buildReadinessPayload(cfg, now, keepOpenManager);
+  const targets = cfg.targets.map((target) => {
+    const scheduleState = getScheduleState(target, now, cfg.scheduleTimeZone);
+    const stay = keepOpenManager?.getTargetStayStatus(target.id) ?? {
+      active: false,
+      durationSec: 0,
+    };
+    return {
+      id: target.id,
+      account: maskAccount(target.account),
+      paused: Boolean(target.paused),
+      lastResult: target.lastResult ?? null,
+      lastSuccessfulVisitAt: target.lastSuccessfulVisitAt ?? null,
+      consecutiveFailures: Math.max(0, Number(target.consecutiveFailures) || 0),
+      scheduleActive: scheduleState.active,
+      scheduledOff: scheduleState.scheduledOff,
+      scheduleNextStart: scheduleState.nextStartAt,
+      nextDue: target.nextDue ? new Date(target.nextDue).toISOString() : null,
+      keepOpenActive: Boolean(stay.active || target.keepOpenActive),
+      readinessIssues: targetReadinessIssues(target, now, cfg.scheduleTimeZone, keepOpenManager),
+    };
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    overall: readiness.ready ? 'ok' : 'degraded',
+    ready: readiness.ready,
+    summary: {
+      totalTargets: targets.length,
+      activeTargets: readiness.activeTargetCount,
+      issueCount: readiness.issueCount,
+      failingTargets: targets.filter((target) => target.consecutiveFailures > 0).length,
+      pausedTargets: targets.filter((target) => target.paused).length,
+      keepOpenTargets: targets.filter((target) => target.keepOpenActive).length,
+    },
+    status: {
+      visits: status.visits,
+      failures: status.failures,
+      uptimeSec: Math.round((Date.now() - Date.parse(status.startedAt)) / 1000),
+      lastVisitAt: status.lastVisitAt,
+    },
+    stats: statsStore?.snapshot(7) ?? null,
+    targets,
+  };
+}
+
+async function handleRequest(req, res, cfg, status, log, controls, admin, targetManager, keepOpenManager = null) {
   let pathname = '/';
   let searchParams = new URLSearchParams();
   try {
@@ -3505,7 +4150,7 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
   // whether every active target remains inside its keep-alive window and is
   // therefore safe to use for alerting and load-balancer decisions.
   if (req.method === 'GET' && pathname === '/readyz') {
-    const readiness = buildReadinessPayload(cfg);
+    const readiness = buildReadinessPayload(cfg, Date.now(), keepOpenManager);
     sendJson(res, readiness.ready ? 200 : 503, readiness);
     return;
   }
@@ -3608,7 +4253,7 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
     sendText(
       res,
       200,
-      buildMetrics(cfg, status, controls),
+      buildMetrics(cfg, status, controls, keepOpenManager),
       'text/plain; version=0.0.4; charset=utf-8',
     );
     return;
@@ -3772,7 +4417,9 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
     }
     sendJson(res, 200, {
       ...status,
-      targets: cfg.targets.map(publicTargetRuntime),
+      targets: cfg.targets.map((target) =>
+        publicTargetRuntime(target, cfg, keepOpenManager),
+      ),
     });
     return;
   }
@@ -3783,7 +4430,7 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
       return;
     }
     if (!requireReadAuth()) return;
-    sendJson(res, 200, await buildOverview(cfg, status, log, controls, admin));
+    sendJson(res, 200, await buildOverview(cfg, status, log, controls, admin, keepOpenManager));
     return;
   }
 
@@ -3878,6 +4525,42 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
     return;
   }
 
+  if (pathname === '/api/public-status') {
+    if (req.method !== 'GET') {
+      sendText(res, 405, 'method not allowed');
+      return;
+    }
+    // PUBLIC_STATUS=true makes this page anonymous; otherwise it stays behind
+    // the normal read auth so an admin can still preview it.
+    if (!cfg.publicStatus && !requireReadAuth()) return;
+    sendJson(res, 200, buildPublicStatus(cfg, status, keepOpenManager));
+    return;
+  }
+
+  if (pathname === '/api/targets/pause-all' || pathname === '/api/targets/resume-all') {
+    if (req.method !== 'POST') {
+      sendText(res, 405, 'method not allowed');
+      return;
+    }
+    if (!requireAdminAuth()) return;
+    const action = pathname.endsWith('pause-all') ? 'pause' : 'resume';
+    const result =
+      action === 'pause' ? await targetManager.pauseAll() : await targetManager.resumeAll();
+    void log({
+      level: 'info',
+      event: action === 'pause' ? 'targets-paused-all' : 'targets-resumed-all',
+      ...result,
+    });
+    sendJson(res, 200, {
+      message:
+        action === 'pause'
+          ? `已暂停 ${result.paused.length} 个目标。`
+          : `已恢复 ${result.resumed.length} 个目标。`,
+      ...result,
+    });
+    return;
+  }
+
   if (pathname === '/api/targets') {
     if (req.method !== 'POST') {
       sendText(res, 405, 'method not allowed');
@@ -3895,6 +4578,97 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
     sendJson(res, 201, {
       message: '目标已创建并加入调度。',
       target: publicManagedTargetRecord(result.record),
+    });
+    return;
+  }
+
+  const targetProbeRoute = pathname.match(/^\/api\/targets\/([^/]+)\/probe$/);
+  if (targetProbeRoute) {
+    if (req.method !== 'POST') {
+      sendText(res, 405, 'method not allowed');
+      return;
+    }
+    if (!requireAdminAuth()) return;
+    const targetId = decodeTargetId(targetProbeRoute[1]);
+    const target = cfg.targets.find((item) => item.id === targetId);
+    if (!target) throw new HttpError(404, '目标不存在。');
+    if (target.running || target.schedulerQueued || target.managementLocked) {
+      throw new HttpError(409, '目标正在巡检或已排队，请稍后再试。');
+    }
+    if (probeInFlight) throw new HttpError(429, '已有探测任务正在进行，请稍后再试。');
+    probeInFlight = true;
+    try {
+      const probe = await probeTarget(cfg, target);
+      void log({
+        level: probe.ok ? 'info' : 'warn',
+        event: 'target-probed',
+        target: target.id,
+        ok: probe.ok,
+        reason: probe.reason,
+        status: probe.httpStatus,
+        ms: probe.ms,
+        proxy: redactProxy(target.proxy),
+      });
+      sendJson(res, 200, {
+        message: probe.ok ? '目标可正常访问。' : '探测完成，目标当前未就绪。',
+        probe,
+      });
+    } catch (error) {
+      if (error?.code === 'probe-timeout') {
+        void log({
+          level: 'warn',
+          event: 'target-probe-timeout',
+          target: target.id,
+          error: error.message,
+        });
+        throw new HttpError(504, error.message);
+      }
+      throw error;
+    } finally {
+      probeInFlight = false;
+    }
+    return;
+  }
+
+  const targetKeepOpenRoute = pathname.match(/^\/api\/targets\/([^/]+)\/keep-open$/);
+  if (targetKeepOpenRoute) {
+    if (req.method !== 'POST') {
+      sendText(res, 405, 'method not allowed');
+      return;
+    }
+    if (!requireAdminAuth()) return;
+    const targetId = decodeTargetId(targetKeepOpenRoute[1]);
+    const target = cfg.targets.find((t) => t.id === targetId);
+    if (!target) throw new HttpError(404, '目标不存在。');
+    const body = await readJsonBody(req);
+    const action = String(body.action || '').trim().toLowerCase();
+    if (!['start', 'stop'].includes(action)) {
+      throw new HttpError(400, 'action 必须是 start 或 stop。');
+    }
+    if (action === 'start') {
+      try {
+        if (keepOpenManager) await keepOpenManager.startTargetStay(target, 'manual');
+        target.keepOpenManual = true;
+      } catch (error) {
+        if (error instanceof KeepOpenCapacityError) {
+          throw new HttpError(409, error.message);
+        }
+        throw error;
+      }
+    } else {
+      if (keepOpenManager) await keepOpenManager.stopTargetStay(target.id, 'manual');
+      target.keepOpenManual = false;
+    }
+    runtimeStateStore?.schedule();
+    void log({
+      level: 'info',
+      event: action === 'start' ? 'target-keep-open-started' : 'target-keep-open-stopped',
+      target: target.id,
+      manual: true,
+    });
+    sendJson(res, 200, {
+      message: action === 'start' ? '已开启长驻挂机保持访问。' : '已停止长驻挂机保持。',
+      target: publicTargetRuntime(target, cfg, keepOpenManager),
     });
     return;
   }
@@ -3919,7 +4693,7 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
     });
     sendJson(res, 200, {
       message: action === 'pause' ? '目标已暂停。' : '目标已恢复调度。',
-      target: publicTargetRuntime(target),
+      target: publicTargetRuntime(target, cfg, keepOpenManager),
     });
     return;
   }
@@ -3973,11 +4747,11 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
  * text/html receive the same password-protected console. STATUS_TOKEN is
  * intentionally read-only and can never unlock the browser console.
  */
-function startHealthServer(cfg, status, log, controls, admin, targetManager) {
+function startHealthServer(cfg, status, log, controls, admin, targetManager, keepOpenManager = null) {
   if (!cfg.port) return null;
 
   const server = createServer((req, res) => {
-    handleRequest(req, res, cfg, status, log, controls, admin, targetManager).catch((error) => {
+    handleRequest(req, res, cfg, status, log, controls, admin, targetManager, keepOpenManager).catch((error) => {
       if (error instanceof HttpError) {
         if (!res.headersSent) sendJson(res, error.status, { error: error.message });
         else res.destroy();
@@ -4014,17 +4788,79 @@ function startHealthServer(cfg, status, log, controls, admin, targetManager) {
   return server;
 }
 
+async function waitForRetryWindow(target, delayMs, timeZone) {
+  const deadline = Date.now() + Math.max(0, delayMs);
+  while (Date.now() < deadline) {
+    if (stopping) return 'stopped';
+    if (
+      target.scheduleEnabled &&
+      getScheduleState(target, Date.now(), timeZone).scheduledOff
+    ) {
+      return 'scheduled-off';
+    }
+    const remainingMs = deadline - Date.now();
+    if (await waitForStop(Math.min(remainingMs, 1_000))) return 'stopped';
+  }
+  return target.scheduleEnabled &&
+    getScheduleState(target, Date.now(), timeZone).scheduledOff
+    ? 'scheduled-off'
+    : 'ready';
+}
+
 async function runTargetCycle(cfg, target, log, cycle, status) {
   const startedAt = Date.now();
   let lastResult = null;
   let attempts = 0;
+
+  const scheduleState = getScheduleState(target, Date.now(), cfg.scheduleTimeZone);
+  const isFirstVisit = scheduleState.active && scheduleState.firstVisitPending;
+  const cycleTimeoutMs = isFirstVisit
+    ? target.firstVisitTimeoutSec * 1000
+    : target.timeoutMs;
+  const cycleWakeWaitMs = isFirstVisit
+    ? target.firstVisitWakeWaitSec * 1000
+    : target.wakeWaitMs;
+  const maxRetries = isFirstVisit ? target.firstVisitRetries : target.retries;
+
+  if (scheduleState.scheduledOff) {
+    await log({
+      level: 'info',
+      event: 'visit-skipped',
+      target: target.id,
+      account: target.account,
+      cycle,
+      reason: 'scheduled-off',
+      nextStart: scheduleState.nextStartAt,
+    });
+    return { ok: false, reason: 'scheduled-off', skipped: true };
+  }
+
   target.running = true;
   try {
-    for (let attempt = 1; attempt <= target.retries + 1; attempt += 1) {
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
       if (stopping) break;
+      if (
+        attempt > 1 &&
+        target.scheduleEnabled &&
+        getScheduleState(target, Date.now(), cfg.scheduleTimeZone).scheduledOff
+      ) {
+        await log({
+          level: 'info',
+          event: 'visit-retry-skipped',
+          target: target.id,
+          account: target.account,
+          cycle,
+          attempt,
+          reason: 'scheduled-off',
+        });
+        break;
+      }
       attempts = attempt;
       try {
-        lastResult = await visitOnce(cfg, target);
+        lastResult = await visitOnce(cfg, target, {
+          timeoutMs: cycleTimeoutMs,
+          wakeWaitMs: cycleWakeWaitMs,
+        });
         await log({
           level: lastResult.ok ? 'info' : 'warn',
           event: 'visit',
@@ -4032,6 +4868,7 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
           account: target.account,
           cycle,
           attempt,
+          firstVisit: isFirstVisit,
           ok: lastResult.ok,
           reason: lastResult.reason ?? 'ready',
           status: lastResult.status ?? null,
@@ -4056,6 +4893,7 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
           account: target.account,
           cycle,
           attempt,
+          firstVisit: isFirstVisit,
           ok: false,
           reason: described.reason,
           proxy: redactProxy(target.proxy),
@@ -4064,23 +4902,63 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
         });
       }
       if (
-        attempt <= target.retries &&
+        attempt <= maxRetries &&
         !stopping &&
         !isAuthenticationFailureReason(lastResult?.reason)
       ) {
-        await waitForStop(cfg.retryDelayMs ?? 60_000);
+        const retryState = await waitForRetryWindow(
+          target,
+          cfg.retryDelayMs ?? 60_000,
+          cfg.scheduleTimeZone,
+        );
+        if (retryState !== 'ready') {
+          await log({
+            level: 'info',
+            event: 'visit-retry-skipped',
+            target: target.id,
+            account: target.account,
+            cycle,
+            attempt,
+            reason: retryState,
+          });
+          break;
+        }
       }
     }
   } finally {
     target.running = false;
   }
   const finalResult = lastResult ?? { ok: false, reason: 'stopped' };
-  recordVisit(status, target, finalResult);
+  if (attempts === 0) {
+    // Shutdown happened before the first attempt. Do not record a visit or a
+    // failure that never took place (it would skew /metrics and stats.json).
+    return { ...finalResult, aborted: true };
+  }
+  const currentScheduleState = getScheduleState(
+    target,
+    Date.now(),
+    cfg.scheduleTimeZone,
+  );
+  if (
+    !stopping &&
+    attempts > 0 &&
+    scheduleState.active &&
+    scheduleState.windowKey &&
+    currentScheduleState.active &&
+    currentScheduleState.windowKey === scheduleState.windowKey
+  ) {
+    // First-visit parameters apply to the first cycle of a window, not only to
+    // the first successful cycle. A failed cold start must not keep every later
+    // cycle in the long wake window for the rest of the day.
+    target.firstVisitWindowKey = scheduleState.windowKey;
+  }
+  recordVisit(status, target, finalResult, { ms: Date.now() - startedAt });
   target.lastVisit = {
     ...finalResult,
     at: new Date().toISOString(),
     attempts,
     ms: Date.now() - startedAt,
+    firstVisit: isFirstVisit,
   };
   if (finalResult.ok) {
     target.authFailureCount = 0;
@@ -4107,7 +4985,12 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
   return finalResult;
 }
 
-function scheduleNext(target, { failed = false } = {}) {
+function scheduleNext(
+  target,
+  { failed = false } = {},
+  now = Date.now(),
+  timeZone = DEFAULT_SCHEDULE_TIMEZONE,
+) {
   const multiplier = failed
     ? Math.min(2 ** Math.max(0, target.consecutiveFailures - 1), FAILURE_BACKOFF_MAX_MULTIPLIER)
     : 1;
@@ -4116,16 +4999,31 @@ function scheduleNext(target, { failed = false } = {}) {
     target.intervalMs * multiplier + jitter,
     MAX_VISIT_WINDOW_MIN * MINUTE,
   );
-  target.nextDue = Date.now() + delay;
+  let nextDue = now + delay;
+
+  if (target.scheduleEnabled) {
+    const scheduleState = getScheduleState(target, now, timeZone);
+    if (scheduleState.active) {
+      if (scheduleState.windowEndMs && nextDue >= scheduleState.windowEndMs) {
+        const nextStart = getNextWindowStart(target, scheduleState.windowEndMs, timeZone);
+        if (nextStart) nextDue = nextStart;
+      }
+    } else {
+      const nextStart = getNextWindowStart(target, now, timeZone);
+      if (nextStart) nextDue = nextStart;
+    }
+  }
+
+  target.nextDue = nextDue;
   runtimeStateStore?.schedule();
-  return delay;
+  return Math.max(0, nextDue - now);
 }
 
 /**
  * Runs the given targets with a bounded worker pool. Each visit owns its own
  * browser process, so one hanging app cannot stall or crash the others.
  */
-async function runTargets(cfg, targets, log, cycle, status) {
+async function runTargets(cfg, targets, log, cycle, status, notifier = null) {
   const queue = targets.slice();
   const results = new Map();
   const queuedTargets = new Set(queue);
@@ -4136,10 +5034,57 @@ async function runTargets(cfg, targets, log, cycle, status) {
     while (queue.length > 0 && !stopping) {
       const target = queue.shift();
       const result = await runTargetCycle(cfg, target, log, cycle, status);
+      if (result.aborted) {
+        results.set(target.id, true);
+        continue;
+      }
+      if (result.skipped) {
+        results.set(target.id, true);
+        if (!cfg.once) {
+          const scheduleState = getScheduleState(
+            target,
+            Date.now(),
+            cfg.scheduleTimeZone,
+          );
+          target.nextDue = scheduleState.nextStartMs ?? null;
+          const nextVisitInMin = Number.isFinite(target.nextDue)
+            ? Math.ceil(Math.max(0, target.nextDue - Date.now()) / MINUTE)
+            : null;
+          await log({
+            level: 'info',
+            event: 'scheduled-skipped',
+            target: target.id,
+            account: target.account,
+            reason: result.reason,
+            nextVisitInMin,
+          });
+          runtimeStateStore?.schedule();
+        }
+        continue;
+      }
       const ok = Boolean(result.ok);
       results.set(target.id, ok);
+      const previousFailures = Math.max(0, Number(target.consecutiveFailures) || 0);
       target.lastResult = ok ? 'ok' : 'failed';
-      target.consecutiveFailures = ok ? 0 : target.consecutiveFailures + 1;
+      target.consecutiveFailures = ok ? 0 : previousFailures + 1;
+      if (ok && previousFailures > 0) {
+        notifier?.notify(`target:${target.id}:recovered`, {
+          event: 'target-recovered',
+          severity: 'info',
+          target: target.id,
+          account: target.account,
+          previousFailures,
+        });
+      } else if (!ok && target.consecutiveFailures === cfg.webhookFailureThreshold) {
+        notifier?.notify(`target:${target.id}:failed`, {
+          event: 'target-failure',
+          severity: 'error',
+          target: target.id,
+          account: target.account,
+          reason: String(result.reason ?? 'unknown').slice(0, 200),
+          consecutiveFailures: target.consecutiveFailures,
+        });
+      }
       if (!cfg.once) {
         if (target.paused) {
           target.nextDue = null;
@@ -4152,7 +5097,7 @@ async function runTargets(cfg, targets, log, cycle, status) {
             pausedUntil: target.pausedUntil,
           });
         } else {
-          const delay = scheduleNext(target, { failed: !ok });
+          const delay = scheduleNext(target, { failed: !ok }, Date.now(), cfg.scheduleTimeZone);
           await log({
             level: ok ? 'info' : 'warn',
             event: 'scheduled',
@@ -4188,6 +5133,10 @@ async function main() {
   let shutdownForceTimer = null;
   try {
     cfg = loadConfig();
+    if (cfg.probeUrl) {
+      await runProbeCli(cfg);
+      return;
+    }
     admin = createAdminAuth(cfg);
     release = await acquireLock(cfg);
     if (!release) {
@@ -4207,21 +5156,51 @@ async function main() {
 
   const log = createLogger(cfg);
   runtimeStateStore = createRuntimeStateStore(cfg, log);
+  statsStore = createStatsStore(cfg, log);
+  const notifier = createNotifier(cfg, log);
   try {
     await runtimeStateStore.load();
   } catch (error) {
     await log({
       level: 'error',
-      event: 'runtime-state-load-failed',
+      event: 'state-load-failed',
       error: error.message,
     }).catch(() => {});
     await release?.().catch(() => {});
     process.exitCode = 2;
     return;
   }
+  try {
+    await statsStore.load();
+  } catch (error) {
+    // Statistics are telemetry, not runtime state: a truncated or hand-edited
+    // stats.json must never stop the agent from keeping sites awake. The store
+    // is already empty after a failed load and the next flush rewrites it.
+    await log({
+      level: 'warn',
+      event: 'stats-load-failed',
+      error: error.message,
+      recovery: 'starting with empty statistics',
+    }).catch(() => {});
+  }
   const status = createStatus(cfg);
   const controls = createRunController(cfg);
-  const targetManager = createTargetManager(cfg, status, controls);
+  const keepOpenManager = createKeepOpenManager(cfg, log, {
+    launchBrowser: async (opts) => {
+      const b = await puppeteer.launch(opts);
+      ACTIVE_BROWSERS.add(b);
+      return b;
+    },
+    closeBrowser,
+    openTargetPage,
+    onTargetStateChanged: () => runtimeStateStore?.schedule(),
+    onAlert: (payload) =>
+      notifier.notify(`keep-open:${payload.target}`, {
+        severity: 'warn',
+        ...payload,
+      }),
+  });
+  const targetManager = createTargetManager(cfg, status, controls, keepOpenManager);
 
   try {
     await cleanupFailureDumps(cfg);
@@ -4245,10 +5224,11 @@ async function main() {
     failureDumpCleanupTimer.unref?.();
   }
 
-  const health = startHealthServer(cfg, status, log, controls, admin, targetManager);
+  const health = startHealthServer(cfg, status, log, controls, admin, targetManager, keepOpenManager);
   const stop = (signal) => {
     const firstSignal = !stopping;
     requestStop();
+    keepOpenManager.stopAll().catch(() => {});
     if (!firstSignal) return;
     void log({ level: 'info', event: 'shutdown', signal }).catch(() => {});
     shutdownForceTimer = setTimeout(() => {
@@ -4267,12 +5247,14 @@ async function main() {
     level: 'info',
     event: 'start',
     mode: cfg.targets.length > 1 ? 'multi' : cfg.targets.length === 1 ? 'single' : 'managed',
+    scheduleTimeZone: cfg.scheduleTimeZone,
     targets: cfg.targets.map((t) => ({ id: t.id, account: t.account, url: t.url, proxy: redactProxy(t.proxy) })),
     intervalMin:
       cfg.targets.length > 0
         ? Math.round(Math.min(...cfg.targets.map((t) => t.intervalMs)) / MINUTE)
         : null,
     maxConcurrent: cfg.maxConcurrent,
+    maxKeepOpenSessions: cfg.maxKeepOpenSessions,
     headless: cfg.headless,
     bindHost: cfg.bindHost,
     requireHttps: cfg.requireHttps,
@@ -4302,7 +5284,14 @@ async function main() {
     if (cfg.targets.length > 0) {
       const minInterval = Math.min(...cfg.targets.map((t) => t.intervalMs));
       cfg.targets.forEach((target, index) => {
-        if (!target.paused && !Number.isFinite(target.nextDue)) {
+        if (!target.paused && (!Number.isFinite(target.nextDue) || target.nextDue <= 0)) {
+          if (target.scheduleEnabled) {
+            const scheduleState = getScheduleState(target, Date.now(), cfg.scheduleTimeZone);
+            if (scheduleState.scheduledOff) {
+              target.nextDue = scheduleState.nextStartMs;
+              return;
+            }
+          }
           target.nextDue = Date.now() + Math.floor((index * minInterval) / cfg.targets.length);
         }
       });
@@ -4310,23 +5299,68 @@ async function main() {
     }
 
     let cycle = 0;
+    let lastReadinessCheckAt = 0;
+    let lastReadinessReady = null;
     while (!stopping) {
       const now = Date.now();
+      await keepOpenManager.tick(cfg.targets, now, cfg.scheduleTimeZone);
       const resumed = resumeExpiredPauses(cfg.targets);
       if (resumed.length > 0) {
         await log({ level: 'info', event: 'targets-auto-resumed', targets: resumed });
       }
+      // Readiness is expensive to compute (per-target timezone math), so poll it
+      // on a fixed cadence. The first sample reports a broken start; afterwards
+      // only transitions are worth a page.
+      if (now - lastReadinessCheckAt >= 30_000) {
+        lastReadinessCheckAt = now;
+        const readiness = buildReadinessPayload(cfg, now, keepOpenManager);
+        if (lastReadinessReady === null) {
+          // First sample: a deployment that starts broken is exactly the case
+          // nobody is watching, so report it instead of waiting for a
+          // transition that may never come. Recovery has nothing to undo yet.
+          if (!readiness.ready) {
+            notifier.notify('readiness', {
+              event: 'readiness-not-ready',
+              severity: 'error',
+              issueCount: readiness.issueCount,
+              targets: readiness.issues.map((issue) => issue.id).slice(0, 20),
+            });
+          }
+        } else if (readiness.ready !== lastReadinessReady) {
+          if (!readiness.ready) {
+            notifier.notify('readiness', {
+              event: 'readiness-not-ready',
+              severity: 'error',
+              issueCount: readiness.issueCount,
+              targets: readiness.issues.map((issue) => issue.id).slice(0, 20),
+            });
+          } else {
+            notifier.notify('readiness-recovered', {
+              event: 'readiness-recovered',
+              severity: 'info',
+            });
+          }
+        }
+        lastReadinessReady = readiness.ready;
+      }
       const manual = new Set(controls.takePending());
-      const due = cfg.targets.filter(
-        (target) =>
-          !target.paused &&
-          !target.managementLocked &&
-          !target.schedulerQueued &&
-          (manual.has(target.id) || (Number.isFinite(target.nextDue) && target.nextDue <= now)),
-      );
+      const due = cfg.targets.filter((target) => {
+        if (target.paused || target.managementLocked || target.schedulerQueued) return false;
+        if (keepOpenManager.isSessionActive(target.id)) return false;
+        if (manual.has(target.id)) return true;
+        if (!Number.isFinite(target.nextDue) || target.nextDue > now) return false;
+        if (target.scheduleEnabled) {
+          const scheduleState = getScheduleState(target, now, cfg.scheduleTimeZone);
+          if (scheduleState.scheduledOff) {
+            target.nextDue = scheduleState.nextStartMs;
+            return false;
+          }
+        }
+        return true;
+      });
       if (due.length > 0) {
         cycle += 1;
-        await runTargets(cfg, due, log, cycle, status);
+        await runTargets(cfg, due, log, cycle, status, notifier);
         continue;
       }
       const nextDue = Math.min(
@@ -4350,6 +5384,15 @@ async function main() {
       await log({
         level: 'warn',
         event: 'runtime-state-flush-failed',
+        error: error.message,
+      }).catch(() => {});
+    }
+    try {
+      await statsStore?.flushNow();
+    } catch (error) {
+      await log({
+        level: 'warn',
+        event: 'stats-flush-failed',
         error: error.message,
       }).catch(() => {});
     }

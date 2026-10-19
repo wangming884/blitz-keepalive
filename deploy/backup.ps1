@@ -13,7 +13,8 @@ $requiredFiles = @(
   'managed-targets.json',
   'target-secrets.key',
   'admin-auth.json',
-  'runtime-state.json'
+  'runtime-state.json',
+  'stats.json'
 )
 
 $resolvedDataDir = [System.IO.Path]::GetFullPath($DataDir)

@@ -22,20 +22,37 @@
             <span class="connection-dot" aria-hidden="true"></span>
             <span id="connection-label">连接中</span>
           </span>
-          <button class="button button-quiet" id="security-button" type="button" hidden>
-            安全设置
-          </button>
           <button class="button button-primary" id="add-target-button" type="button" hidden>
             添加目标
-          </button>
-          <button class="button button-quiet" id="refresh-button" type="button">
-            刷新
           </button>
           <button class="button button-primary" id="run-all-button" type="button">
             立即巡检
           </button>
-          <button class="button button-quiet" id="logout-button" type="button" hidden>
-            退出登录
+          <button class="button button-quiet" id="refresh-button" type="button">
+            刷新
+          </button>
+          <div class="topbar-secondary" id="topbar-secondary">
+            <button class="button button-quiet" id="pause-all-button" type="button" hidden>
+              全部暂停
+            </button>
+            <button class="button button-quiet" id="resume-all-button" type="button" hidden>
+              全部恢复
+            </button>
+            <button class="button button-quiet" id="security-button" type="button" hidden>
+              安全设置
+            </button>
+            <button class="button button-quiet" id="logout-button" type="button" hidden>
+              退出登录
+            </button>
+          </div>
+          <button
+            class="button button-quiet topbar-more-toggle"
+            id="topbar-more-toggle"
+            type="button"
+            aria-expanded="false"
+            aria-controls="topbar-secondary"
+          >
+            更多
           </button>
         </div>
       </header>
@@ -155,6 +172,17 @@
             </article>
           </section>
 
+          <section class="panel stats-panel" aria-labelledby="stats-title">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">趋势</p>
+                <h2 id="stats-title">近 7 天访问</h2>
+              </div>
+              <span class="panel-hint" id="stats-summary">暂无统计</span>
+            </div>
+            <div class="stats-bars" id="stats-bars" role="img" aria-label="近 7 天每日访问与失败次数"></div>
+          </section>
+
           <section class="panel targets-panel" aria-labelledby="targets-title">
             <div class="panel-heading">
               <div>
@@ -180,6 +208,8 @@
                 <button class="filter-chip" type="button" data-filter="healthy" aria-pressed="false">正常</button>
                 <button class="filter-chip" type="button" data-filter="failing" aria-pressed="false">失败</button>
                 <button class="filter-chip" type="button" data-filter="paused" aria-pressed="false">暂停</button>
+                <button class="filter-chip" type="button" data-filter="scheduled-off" aria-pressed="false">计划关闭</button>
+                <button class="filter-chip" type="button" data-filter="keep-open" aria-pressed="false">挂机保持</button>
                 <button class="filter-chip" type="button" data-filter="waiting" aria-pressed="false">等待</button>
               </div>
               <div class="target-transfer-actions">
@@ -229,7 +259,7 @@
           </div>
           <button class="icon-button" id="target-cancel-x" type="button" aria-label="关闭">×</button>
         </div>
-        <p class="dialog-intro">保存后会立即加入调度；首次访问会在约 1 秒后开始。</p>
+        <p class="dialog-intro">保存后加入调度；未开启定时或处于活动窗口时约 1 秒后开始首次访问，计划关闭时将在下一活动窗口开启时立即发起首次访问。</p>
         <div class="form-grid">
           <div class="field field-wide">
             <label for="target-url">网页地址 <span aria-hidden="true">*</span></label>
@@ -302,6 +332,11 @@
             <input id="target-jitter" name="jitterMin" type="number" min="0" max="10" step="1" value="2" required>
             <small>在间隔上增加 0–10 分钟随机延迟，且总和不超过 28 分钟。</small>
           </div>
+          <div class="field">
+            <label for="target-wake-wait">常规唤醒等待（秒）</label>
+            <input id="target-wake-wait" name="wakeWaitSec" type="number" min="5" max="300" step="1" value="30">
+            <small>日常巡检遇到 503 或休眠时的等待与探活时间（5–300 秒）。</small>
+          </div>
           <div class="field field-wide">
             <label for="target-expect">期望文本</label>
             <textarea id="target-expect" name="expect" maxlength="500" rows="3" placeholder="例如 Dashboard（可选）"></textarea>
@@ -311,6 +346,98 @@
             <label for="target-login-success-selector">登录成功选择器</label>
             <input id="target-login-success-selector" name="loginSuccessSelector" type="text" maxlength="300" placeholder="例如 #dashboard 或 [data-signed-in]">
             <small>配置后台访问密码时，需填写期望文本或此 CSS 选择器中的至少一项。</small>
+          </div>
+          <div class="field field-wide">
+            <label class="checkbox-row" for="target-schedule-enabled">
+              <input id="target-schedule-enabled" name="scheduleEnabled" type="checkbox">
+              <span>启用定时启停（仅在活动窗口内自动巡检）</span>
+            </label>
+            <small>非活动窗口自动处于“计划关闭”状态且不产生就绪告警；活动窗口开启时立即发起首次访问。</small>
+          </div>
+          <div class="field field-wide schedule-fields" id="target-schedule-fields" hidden>
+            <div class="form-grid">
+              <div class="field">
+                <label for="target-schedule-start">活动开始时间 <span aria-hidden="true">*</span></label>
+                <input id="target-schedule-start" name="scheduleStart" type="time" value="08:00">
+                <small>24 小时制（例如 08:00），包含开始时刻。</small>
+              </div>
+              <div class="field">
+                <label for="target-schedule-end">活动结束时间 <span aria-hidden="true">*</span></label>
+                <input id="target-schedule-end" name="scheduleEnd" type="time" value="23:00">
+                <small>24 小时制（例如 23:00），不包含结束时刻；可跨午夜（22:00 - 02:00 表示次日 02:00 结束）。</small>
+              </div>
+              <div class="field field-wide">
+                <label>生效星期 <span aria-hidden="true">*</span></label>
+                <div class="weekdays-grid" id="target-schedule-days">
+                  <label class="checkbox-inline"><input type="checkbox" name="scheduleDay" value="1" checked><span>周一</span></label>
+                  <label class="checkbox-inline"><input type="checkbox" name="scheduleDay" value="2" checked><span>周二</span></label>
+                  <label class="checkbox-inline"><input type="checkbox" name="scheduleDay" value="3" checked><span>周三</span></label>
+                  <label class="checkbox-inline"><input type="checkbox" name="scheduleDay" value="4" checked><span>周四</span></label>
+                  <label class="checkbox-inline"><input type="checkbox" name="scheduleDay" value="5" checked><span>周五</span></label>
+                  <label class="checkbox-inline"><input type="checkbox" name="scheduleDay" value="6" checked><span>周六</span></label>
+                  <label class="checkbox-inline"><input type="checkbox" name="scheduleDay" value="7" checked><span>周日</span></label>
+                </div>
+                <small>仅在选中的星期自动执行保活巡检。</small>
+              </div>
+              <div class="field field-wide">
+                <label for="target-schedule-timezone">活动窗口时区</label>
+                <input id="target-schedule-timezone" name="scheduleTimezone" type="text" maxlength="64" list="timezone-options" placeholder="留空跟随全局时区">
+                <datalist id="timezone-options">
+                  <option value="Asia/Shanghai"></option>
+                  <option value="Asia/Tokyo"></option>
+                  <option value="Asia/Singapore"></option>
+                  <option value="Europe/London"></option>
+                  <option value="Europe/Berlin"></option>
+                  <option value="America/New_York"></option>
+                  <option value="America/Los_Angeles"></option>
+                  <option value="UTC"></option>
+                </datalist>
+                <small>IANA 时区名，例如 Asia/Shanghai、America/New_York；留空使用全局设置。</small>
+              </div>
+              <div class="field">
+                <label for="target-first-wake-wait">首次唤醒等待（秒）</label>
+                <input id="target-first-wake-wait" name="firstVisitWakeWaitSec" type="number" min="5" max="300" step="1" value="180">
+                <small>活动窗口开启后首次访问的冷启动等待时间（5–300 秒）。</small>
+              </div>
+              <div class="field">
+                <label for="target-first-timeout">首次页面超时（秒）</label>
+                <input id="target-first-timeout" name="firstVisitTimeoutSec" type="number" min="5" max="300" step="1" value="180">
+                <small>首次访问导航及页面整体超时时间（5–300 秒）。</small>
+              </div>
+              <div class="field">
+                <label for="target-first-retries">首次重试次数</label>
+                <input id="target-first-retries" name="firstVisitRetries" type="number" min="0" max="5" step="1" value="2">
+                <small>窗口首次访问失败时的重试轮数（0–5 次）。</small>
+              </div>
+            </div>
+          </div>
+          <div class="field field-wide">
+            <label class="checkbox-row" for="target-keep-open-enabled">
+              <input id="target-keep-open-enabled" name="keepOpenEnabled" type="checkbox">
+              <span>保持长驻访问（Keep-Open 挂机保持模式）</span>
+            </label>
+            <small>浏览器打开页面后保持常驻连接不关闭，模拟用户一直挂在网站上；支持手动启闭或指定挂机时间段。</small>
+          </div>
+          <div class="field field-wide keep-open-fields" id="target-keep-open-fields" hidden>
+            <div class="form-grid">
+              <div class="field field-wide">
+                <label class="checkbox-row" for="target-keep-open-scheduled">
+                  <input id="target-keep-open-scheduled" name="keepOpenScheduled" type="checkbox">
+                  <span>在指定时间段自动长驻挂机</span>
+                </label>
+                <small>开启后仅在下列时间段内保持打开网页挂机，其余时间自动关闭或按普通周期巡检。</small>
+              </div>
+              <div class="field">
+                <label for="target-keep-open-start">挂机开始时间</label>
+                <input id="target-keep-open-start" name="keepOpenStart" type="time" value="09:00">
+                <small>24 小时制（例如 09:00）。</small>
+              </div>
+              <div class="field">
+                <label for="target-keep-open-end">挂机结束时间</label>
+                <input id="target-keep-open-end" name="keepOpenEnd" type="time" value="18:00">
+                <small>24 小时制（例如 18:00），可跨午夜（22:00 - 02:00）。</small>
+              </div>
+            </div>
           </div>
         </div>
         <p class="form-error" id="target-form-error" role="alert" hidden></p>

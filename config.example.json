@@ -4,7 +4,7 @@
     "jitterMin": 3,
     "expect": "",
     "timeoutSec": 60,
-    "wakeWaitSec": 45,
+    "wakeWaitSec": 30,
     "settleSec": 6,
     "retries": 2,
     "retryDelaySec": 60,

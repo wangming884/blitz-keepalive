@@ -69,14 +69,14 @@ targets.json
   └─ worker 1: 启动独立 Chrome → 访问 → 校验 → 关闭
         │
         ▼
-每个目标独立计算下一次时间、独立重试、独立失败截图
+每个目标独立计算下一次时间、独立重试（失败截图需开启 `DUMP_FAILURES`）
 ```
 
 设计要点：
 
 - **首轮错峰**：启动后把目标按 `interval / 目标数` 铺开，避免同时打满；之后各目标按自己的间隔运行。
 - **每个目标独立浏览器进程**：一个应用卡死不会拖垮其他应用；并发上限防止内存尖峰。
-- **独立失败处理**：每个目标有自己的重试次数与日志字段（`target` / `account`），失败现场按 `target` 命名。
+- **独立失败处理**：每个目标有自己的重试次数与日志字段（`target` / `account`）；开启 `DUMP_FAILURES=true` 后，失败现场按 `target` 命名落盘。
 - **单实例锁**：常驻进程和 cron 扫描不会同时跑；锁文件按工作目录区分。
 - **可选的后台访问密码**：只访问唤醒页也能让 blitz 应用保持唤醒；如果希望每次巡检继续进入应用后台，可在网页管理端为单个目标保存访问密码，让浏览器自动填写密码框并提交登录表单。密码加密后持久化，不会写入日志或 API 响应。
 
@@ -91,7 +91,7 @@ targets.json
     "jitterMin": 3,
     "expect": "",
     "timeoutSec": 60,
-    "wakeWaitSec": 45,
+    "wakeWaitSec": 30,
     "settleSec": 6,
     "retries": 2,
     "retryDelaySec": 60
@@ -115,14 +115,49 @@ targets.json
 | `expect` | **建议填写**应用页面独有文字，最可靠的「已唤醒」判据 |
 | `intervalMin` | 该目标的访问间隔，1–28 分钟，且必须满足 `intervalMin + jitterMin <= 28` |
 | `jitterMin` | 该目标的随机延迟上限，0–10 分钟 |
-| `timeoutSec` / `wakeWaitSec` / `settleSec` / `retries` | 覆盖默认超时、唤醒等待、停留、重试 |
+| `wakeWaitSec` | 常规巡检唤醒等待与探活时间（秒，5–300，默认 30；支持在后台表单配置） |
+| `timeoutSec` / `settleSec` / `retries` | 覆盖默认超时、停留、重试 |
+| `scheduleEnabled` | 是否启用定时启停（布尔值，默认 false） |
+| `scheduleStart` / `scheduleEnd` | 活动窗口时间（24 小时制 HH:MM，默认 08:00 - 23:00；开始晚于结束表示跨午夜） |
+| `scheduleDays` | 生效星期（数字数组 1-7，1 为周一，默认 [1,2,3,4,5,6,7]） |
+| `scheduleTimezone` | 目标级 IANA 时区（可选，留空跟随全局 `SCHEDULE_TIMEZONE`） |
+| `firstVisitWakeWaitSec` | 窗口开启时首次访问唤醒等待时间（秒，5–300，默认 180） |
+| `firstVisitTimeoutSec` | 窗口开启时首次访问页面超时时间（秒，5–300，默认 180） |
+| `firstVisitRetries` | 窗口开启时首次访问重试次数（0–5，默认 2） |
 | `maxConcurrent` | 同时访问几个目标；默认 1，Docker 生产配置固定为 1 |
 
 优先级：**目标级 > 命令行/环境变量 > defaults**。例如给 n8n 单独设 15 分钟，其余仍用 20 分钟。
 
 `intervalMin + jitterMin` 必须不超过 28 分钟。这样即使取到最大抖动，下一次访问仍会发生在 blitz.cloud 的 30 分钟休眠阈值之前；配置为 29 分钟，或 20 分钟间隔加 10 分钟抖动，都会在启动时被拒绝。
 
-### 3.3 目标后台访问密码
+### 3.3 目标定时启停与首次访问唤醒
+
+为避免全天无休巡检占用云端资源并降低被官方平台风控的概率，每个目标都支持独立的“定时启停”和“首次访问独立参数”：
+
+1. **活动窗口与时区**：
+   - 支持设置每日开始时间（scheduleStart）和结束时间（scheduleEnd），严格采用 24 小时制 HH:MM。
+   - 支持同日窗口和跨午夜窗口：`08:00 - 23:00` 表示当天；`22:00 - 02:00` 表示从当天 22:00 到次日 02:00（星期按窗口**开始**那天计算）。
+   - 开始时间包含，结束时间不包含；开始与结束相同会被拒绝。
+   - 支持按星期多选生效（scheduleDays，1=周一，7=周日）。
+   - 全局时区通过环境变量 SCHEDULE_TIMEZONE 或参数 --schedule-timezone 指定，默认 Asia/Shanghai；每个目标还可以用 `scheduleTimezone` 单独覆盖（例如 `America/New_York`）。
+2. **计划关闭（Scheduled Off）**：
+   - 在活动窗口之外，目标自动处于“计划关闭”状态。
+   - 计划关闭期间，调度器不会自动发起新的巡检，但不影响已经开始的访问完成。
+   - 计划关闭不属于异常或手动暂停，**不计入 /readyz 就绪检测故障**，健康检测保持正常。
+   - 管理员在控制台依然可以随时对计划关闭的目标点击“立即巡检”。
+   - 手动暂停优先级最高：若管理员手动暂停了目标，即使进入活动窗口也不会自动运行。
+3. **冷启动与 HTTP 503/502/504 自动探活**：
+   - 当云平台（如 Blitz、Render 等）冷启动时，网关常返回 HTTP 503 Service Unavailable 或 502/504。
+   - 系统将 503/502/504 明确识别为“服务唤醒中 / 未就绪”（`not-ready:http-503` 等），严禁将其作为已就绪处理。
+   - 在唤醒等待时间（日常 `wakeWaitSec` 或首访 `firstVisitWakeWaitSec`，均支持 5–300 秒）内，系统自动每隔 4 秒执行页面刷新探活（`page.reload`），直至容器启动完成返回 HTTP 200 并展现正常页面。
+4. **窗口开启时立即发起首次唤醒**：
+   - 当活动窗口到达开启时刻，调度器将**立即**对该目标发起首次唤醒访问。
+   - 每个活动窗口在首次成功访问之前，自动采用专属的冷启动参数：firstVisitWakeWaitSec（默认 180 秒）、firstVisitTimeoutSec（默认 180 秒）、firstVisitRetries（默认 2 次）。
+   - 首次访问成功后，系统记录当期窗口标识（firstVisitWindowKey），随后的常规巡检自动切回普通间隔和普通超时参数。
+   - 若首次访问因目标实例冷启动缓慢而失败，系统不会记录窗口成功标记，后续重试将继续使用首次唤醒参数，直到成功或离开窗口。
+   - 修改目标 URL 会自动重置窗口首次访问标记。
+
+### 3.4 目标后台访问密码
 
 网页管理端的目标编辑窗口支持“后台访问密码”。配置后，巡检会先等待应用可访问，再在所有 frame 中查找第一个可见的密码输入框，按真实键盘节奏输入密码，并提交所在表单（没有提交按钮时按 Enter）。登录后再用 `expect` 校验应用后台内容，因此建议把 `expect` 设置为登录后才出现的文字。
 
@@ -134,6 +169,27 @@ targets.json
 - 编辑时密码留空表示保留原密码；勾选“清除已保存的访问密码”才会删除。不能在同一次请求中同时设置和清除。
 - 目标后台访问密码和网页目标代理密码都使用 AES-256-GCM 加密，目标 ID 作为 AAD。密钥来自 `TARGET_SECRET_KEY`，或自动生成到 `TARGET_SECRET_KEY_FILE`（默认 `data/target-secrets.key`，权限 `0600`）。必须把密钥文件与 `managed-targets.json` 一起备份；密钥丢失后已保存的密码无法恢复，服务会拒绝启动而不是静默跳过。
 - API 只返回 `loginPasswordConfigured` / `proxyPasswordConfigured` 布尔值，不返回明文、密文或密钥；失败现场写盘前也会清除所有 frame 中的密码框内容。
+
+### 3.5 浏览器长驻挂机模式（Keep-Open / 常驻保持访问）
+
+某些特定服务（如长连接面板、WebSocket 会话或无操作数分钟即强制休眠的平台）要求浏览器**保持常驻打开**，而不仅是每隔 20 分钟访问一次。本项目提供了**长驻挂机保持模式**：
+
+1. **手动启闭与卡片快捷控制**：
+   - 在管理控制台目标卡片的操作栏中，点击 **「保持访问」** 即可立即启动该目标的长驻挂机。
+   - 启动后卡片状态会变为 **「挂机保持中」**（带有微光呼吸指示灯），并显示当前已保持在线的分钟数。
+   - 随时点击 **「停止保持」** 即可安全优雅地关闭该挂机浏览器进程，目标恢复为常规巡检。
+2. **指定时间段自动挂机**：
+   - 编辑目标表单时，勾选“保持长驻访问（Keep-Open）”并设置“在指定时间段自动长驻挂机”（如 `09:00 - 18:00`）。
+   - 到达设定时间段时，系统会自动拉起独立浏览器进程常驻挂机；离开时间段后自动平稳退出。
+3. **心跳探活与内存防爆机制**：
+   - 挂机期间，系统每隔 30 秒执行一次轻量页面心跳与微小交互（鼠标移动、DOM 活性检测），防止网页被判定为空闲断开；
+   - 每隔 2 小时自动对页面进行热重载（`page.reload`），释放 SPA 网页长时间运行的 JS 内存泄漏；
+   - 心跳或热重载失败时，系统会关闭异常浏览器并按退避策略自动重连，避免挂机会话静默失效；
+   - 挂机目标在保持期间自动免于重复触发常规排期巡检，避免资源浪费。
+4. **并发上限与重启语义**：
+   - `MAX_KEEP_OPEN_SESSIONS`（或 `--max-keep-open-sessions`）控制同时挂机的会话数，范围 1–10，默认 1；每个会话都会占用独立 Chromium 进程，请按机器内存谨慎调高。
+   - 达到上限时，新的人工启动请求会返回 409；定时挂机启动失败会在 30 秒后自动重试。
+   - 定时挂机配置会持久化；**手动开启的挂机状态不会持久化**，进程重启后不会自动恢复，需由管理员重新开启。
 
 > 多目标模式下请把 `.env` 里的 `INTERVAL_MIN` / `JITTER_MIN` **留空**（安装脚本会自动清空），否则这个全局值会覆盖 JSON 里的 `defaults`。需要全局统一调整时再显式填写或传 `--interval-min`。
 
@@ -251,6 +307,13 @@ PROXY_BYPASS=localhost,127.0.0.1
 ```
 blitz-keepalive/
 ├── keepalive.mjs                 # 主程序：调度、并发池、单实例锁、重试、日志、健康检查服务
+├── schedule.mjs                  # 目标活动窗口与首次唤醒参数（时区无关的纯函数）
+├── keepopen.mjs                  # 长驻挂机会话：心跳、重连、窗口内自动启停
+├── urlguard.mjs                  # 目标 URL 安全：白名单、私网拦截、可信代理 CIDR
+├── stats.mjs                     # 每日访问统计（data/stats.json，保留 90 天）
+├── notify.mjs                    # webhook 告警（去重 + 静默窗口）
+├── storage.mjs                   # 原子写 JSON 的共享工具
+├── scripts/check-syntax.mjs      # 全仓语法检查（npm run check）
 ├── config.example.json           # 多账号 / 多应用配置模板
 ├── .env.example                  # 环境变量模板
 ├── Dockerfile                    # 可部署到 blitz.cloud 的镜像（内置 Chromium + /healthz + /readyz）
@@ -267,6 +330,8 @@ blitz-keepalive/
 │   └── backup-crypto.mjs         # AES-256-GCM 备份加解密工具
 ├── public/                       # 管理网页：原生 HTML / CSS / JavaScript
 │   ├── index.html
+│   ├── status.html               # 只读状态页
+│   ├── status.js
 │   ├── styles.css
 │   └── app.js
 ├── test/fake-blitz.mjs           # 本地模拟 blitz 休眠/唤醒，用于验证
@@ -274,9 +339,13 @@ blitz-keepalive/
 ├── test/targets-proxy.json       # 代理优先级测试配置
 ├── test/admin-smoke.mjs          # 登录、目标 CRUD、自动巡检与持久化回归
 ├── test/hardening.mjs            # 指标、锁、运行态、备份与严格子资源回归
+├── test/schedule.mjs             # 活动窗口与首访参数回归
+├── test/keepopen.mjs             # 挂机会话生命周期、心跳与重连回归
+├── test/readiness.mjs            # /readyz 与生产就绪语义回归
+├── test/features.mjs             # 统计、webhook、状态页、探测与批量操作回归
 ├── .github/workflows/ci.yml      # Node 22/24 语法、测试与依赖审计
 ├── data/                         # 网页目标、管理密码与目标密码加密密钥（运行时生成）
-└── logs/                         # 运行日志与失败现场（运行时生成）
+└── logs/                         # 运行日志（失败现场需开启 DUMP_FAILURES）
 ```
 
 运行时依赖只有一个：`puppeteer-core`（不下载浏览器，直接驱动系统已安装的 Chrome/Edge）。管理网页使用原生 HTML / CSS / JavaScript，不需要前端构建步骤或额外依赖。
@@ -763,7 +832,7 @@ sudo certbot renew --dry-run
 10. **相互保活**：两个 agent 容器分别访问对端模拟应用，间隔 1 分钟运行 150 秒，双方各完成 3 次成功访问（`ms` 约 1.4–5.6 秒），没有失败。
 11. **HTTP 代理**：本地 HTTP 代理（`test/fake-proxy.mjs`）验证通过，代理日志确认目标请求为 `GET http://127.0.0.1:8862/`；带 Basic 认证时 `authenticated:true`。HTTPS 目标走 CONNECT，代理日志确认 CONNECT 同样携带认证。
 12. **SOCKS5**：本地 SOCKS5 代理验证通过，`ok:true`；配置 SOCKS 用户名/密码时按预期以退出码 2 拒绝。
-13. **认证失败**：错误密码返回 HTTP 407，日志为 `proxy-auth-rejected`，约 0.8 秒失败（不空等 45 秒唤醒页）。
+13. **认证失败**：错误密码返回 HTTP 407，日志为 `proxy-auth-rejected`，约 0.8 秒失败（不空等 30 秒唤醒页）。
 14. **代理不可达**：日志为 `proxy-unreachable:ERR_PROXY_CONNECTION_FAILED`，带 `proxyError:true`。
 15. **目标级代理优先级**：显式代理 → 成功；`proxy: ""` → 直连成功；未配置 → 继承全局（故意设为不可达）→ 按预期失败。
 16. **脱敏**：日志中未出现代理用户名、密码或 `user:pass@` 形式。
@@ -788,7 +857,38 @@ sudo certbot renew --dry-run
 - 清空日志不会删除 `logs/failures/` 下的失败现场；`STATUS_TOKEN` 只读，无权调用清空接口。
 - 建议每天扫一次 `"ok":false`，按 `target` 聚合；连续失败通常意味着页面文案变了、目标被暂停，或 Chrome 升级出问题。
 
-### 10.1 管理网页
+### 10.1 只读状态页与每日统计
+
+- `/status`：面向同事或客户的只读状态页，展示目标健康、最近成功、下次执行与近 7 天访问量；**不包含**目标 URL、代理配置或任何凭据，账号字段会做掩码（`a***@example.com`）。
+- 默认需要读权限（管理会话或 `STATUS_TOKEN`）；设置 `PUBLIC_STATUS=true` 后匿名可访问。
+- `data/stats.json`：按 `SCHEDULE_TIMEZONE` 的本地日累计 `visits` / `ok` / `failed` / 总耗时，保留 90 天；`/api/overview` 与管理台展示近 7 天柱状图。文件损坏时只记一条 `stats-load-failed` 警告并以空统计启动，不会阻塞保活。
+- `/metrics` 新增 `blitz_keepalive_visit_duration_seconds`（直方图）与 `blitz_keepalive_keep_open_sessions`（当前挂机会话数）。
+
+### 10.2 诊断与批量操作
+
+- `node keepalive.mjs --probe=https://app.example.com`：打开一次页面并输出 `ok / reason / httpStatus / title / readyState / 命中的未就绪正则 / expect 是否命中 / 是否有密码框 / 耗时 / 文本片段`。不写运行态、不进调度、不影响统计，适合首次配置目标时确认判据。
+- 管理台每个目标的“测试连通”按钮调用 `POST /api/targets/:id/probe`，会走该目标自己的代理配置，返回同样的诊断信息。
+- 探测带整体看门狗：预算 = 导航超时 + 唤醒等待 + 30s（下限 60s、上限 180s）。超出即判定页面/浏览器无响应，CLI 输出 `probe-timeout`，接口返回 **504**，不会让一个请求无限挂住。
+- `POST /api/targets/pause-all` / `POST /api/targets/resume-all` 批量暂停或恢复；正在巡检的目标会被跳过并出现在 `skipped` 中。
+- 导入目标前会显示“新增 / 更新 / 不变 / 移除”差异预览，再执行替换。
+
+### 10.3 Webhook 告警
+
+设置 `WEBHOOK_URL` 后，以下事件会以 JSON POST 推送：
+
+| event | 触发条件 |
+| --- | --- |
+| `target-failure` | 连续失败次数达到 `WEBHOOK_FAILURE_THRESHOLD`（默认 3） |
+| `target-recovered` | 之前失败的目标恢复成功 |
+| `readiness-not-ready` / `readiness-recovered` | 首次采样即不就绪，或 `/readyz` 就绪状态翻转 |
+| `keep-open-unstable` | 挂机会话连续 3 次连接或心跳失败 |
+
+- 同一告警键在 `WEBHOOK_MIN_INTERVAL_SEC`（默认 900 秒）内只发送一次；发送失败会清除静默记录，下次事件可重试。
+- 静默记录最多保留 500 条（键里含目标 ID），超出后先清理已过期项、再丢弃最旧的，长期运行不会无界增长。
+- 载荷只包含目标 ID、账号、原因和计数，**不包含 URL、代理或任何凭据**。
+- 推送是 fire-and-forget，超时（默认 10 秒）不会阻塞调度。
+
+### 10.4 管理网页
 
 设置 `PORT` 启动 HTTP 服务后，在浏览器打开：
 
@@ -856,7 +956,7 @@ POST   /api/targets/import          # 完整替换网页管理目标
 Authorization: Bearer <STATUS_TOKEN>
 ```
 
-### 10.2 备份、恢复与发布检查
+### 10.5 备份、恢复与发布检查
 
 网页目标、管理密码哈希、目标密码加密密钥和运行态必须一起备份。仓库提供两个不输出密码或密钥内容的脚本；归档默认使用 AES-256-GCM 加密，成功后删除明文归档：
 
@@ -887,23 +987,24 @@ bash ./deploy/backup.sh --data-dir ./data --output-dir ./backups --passphrase-fi
 - `target-secrets.key`：目标密码和代理密码的解密密钥，丢失后已保存密码无法恢复。
 - `admin-auth.json`：管理密码的 scrypt 哈希。
 - `runtime-state.json`：暂停状态、最近结果和下一次执行时间；文件不存在时仅警告。
+- `stats.json`：每日访问统计；文件不存在时仅警告（首次访问后才生成）。
 
 加密后的归档仍应视为敏感文件。Windows 脚本会尝试限制 `.enc`（以及显式保留的 ZIP）的 ACL，Linux 脚本使用 `umask 077`、目录 `0700` 和文件 `0600`。备份口令必须与归档分开保存；口令丢失后无法恢复。
 
-恢复步骤：停止服务，解密归档并解压，将四个文件恢复到同一数据目录并保持权限 `0600`，再启动服务：
+恢复步骤：停止服务，解密归档并解压，将数据文件恢复到同一数据目录并保持权限 `0600`，再启动服务：
 
 ```powershell
 node deploy\backup-crypto.mjs decrypt .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip.enc
 Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip -DestinationPath .\data -Force
 ```
 
-不要把旧密钥与另一批目标文件混用。升级前先运行 `npm test`；CI 会对 Node 22/24 执行语法检查、完整冒烟测试、加固回归和高危依赖审计，并校验生产 Compose 与 Nginx 配置。
+不要把旧密钥与另一批目标文件混用。升级前先运行 `npm run check && npm test`；CI 会对 Node 22/24 执行全仓语法检查、完整冒烟测试、加固回归和高危依赖审计，并校验生产 Compose 与 Nginx 配置。
 
 ## 11. 风险与注意事项
 
 1. **服务条款**：blitz.cloud 把「保持唤醒」作为 Pro 付费功能，用浏览器模拟访客属于绕过。账号越多、访问越规律，越容易被识别；可能被限流、要求升级或停用。生产环境请购买 Pro。
 2. **判定依赖官方实现**：访客识别、唤醒页文案都可能调整。最稳的做法是给每个目标配置 `expect`；文案变化时用 `--not-ready-regex` 补充规则。
-3. **无头指纹**：UA 已从 `HeadlessChrome` 改为普通 Chrome，但仍不是 100% 隐身；失败时改用有头模式 + Xvfb。
+3. **无头指纹**：UA 已按运行中的 Chromium 主版本生成，并替换掉 `HeadlessChrome` 标记，但仍不是 100% 隐身；失败时改用有头模式 + Xvfb。
 4. **资源占用**：每个浏览器实例约 150–250 MB，单次约 6 秒；跑在你自己的服务器上，不占 blitz 的 512 MB 内存池。
 5. **不是高可用**：服务器宕机、断网期间应用仍会休眠；下一次真实访问会自动唤醒（约 10 秒）。
 6. **免费版后台应用**：如果你不需要 HTTP 地址，直接选「Runs in the background」，它永不睡眠（免费版仅 2 天无账号活动后停止，点一次 Start 即可恢复）——这比保活更省事。
@@ -914,6 +1015,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 11. **代理凭据**：优先用 `PROXY_PASSWORD` 等环境变量，`--proxy-pass` 会出现在进程列表；SOCKS 认证不被 Chromium 支持；Chrome 仍会经代理发出少量后台请求（组件更新、GCM），代理侧会看到这些域名。
 12. **暂停与运行态**：手动暂停和自动认证失败暂停会写入 `runtime-state.json`，重启后继续保持；需要长期停用时仍建议删除目标或移出配置文件，并定期备份运行态文件。
 13. **HTTPS 代理信任**：`REQUIRE_HTTPS=true` 时 `/healthz` 与 `/readyz` 在应用层允许明文探针，示例 Nginx 默认只允许本机访问 `/readyz`；只有配置了可信代理 CIDR，服务才接受 `X-Forwarded-Proto: https`，否则反向代理后的请求也会被 426 拒绝。
+14. **目标 URL 安全边界**：主文档导航（含 302 跳转）会逐请求校验允许列表与私网地址，子资源默认只拦私网地址。校验时解析 DNS、浏览器随后会再解析一次，理论上仍有 DNS rebinding 窗口；因此管理密码必须足够强，不要把 `TARGET_URL_ALLOWLIST=*` 与 `TARGET_URL_ALLOW_PRIVATE=true` 同时暴露到公网。
 
 ## 12. 参数速查
 
@@ -926,7 +1028,9 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --interval-min=20   访问间隔（1..28，且与 jitter 之和不超过 28）
 --jitter-min=2      随机抖动上限（0..10）
 --max-concurrent=1  并发访问数（默认 1；生产 Compose 固定 1）
+--max-keep-open-sessions=1  同时长驻挂机会话上限（1..10，默认 1）
 --once              立即访问所有目标一次
+--probe=<url>       打开一次目标并输出诊断信息（不写运行态、不进调度）
 --headless=false    有头模式
 --chrome=<path>     指定 Chrome/Edge
 --port=8090         启动 HTTP 服务与管理网页（Docker/blitz 部署必需）
@@ -935,6 +1039,14 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --admin-password-file=data/admin-auth.json  持久化 scrypt 密码文件（优先于 --admin-password）
 --managed-targets-file=data/managed-targets.json  网页目标持久化文件
 --runtime-state-file=data/runtime-state.json  暂停、最近结果和下次执行时间持久化文件
+--stats-file=data/stats.json  每日访问统计文件（保留 90 天）
+--public-status=false  是否允许匿名访问 /status 与 /api/public-status
+--webhook-url=...  webhook 告警地址（默认关闭）
+--webhook-min-interval-sec=900  同类告警静默窗口
+--webhook-timeout-sec=10  webhook 请求超时
+--webhook-failure-threshold=3  连续失败多少次触发 target-failure 告警
+--block-resources=  过滤资源类型（image,media,font,stylesheet,texttrack,manifest,other；默认不过滤）
+--schedule-timezone=...  定时活动窗口计算时区（默认 Asia/Shanghai，优先用环境变量 SCHEDULE_TIMEZONE）
 --target-secret-key=...  目标密码加密密钥（32 字节 base64 或 64 位 hex；优先用环境变量）
 --target-secret-key-file=data/target-secrets.key  自动生成/读取的目标密码与代理密码加密密钥文件
 --status-token=...  只读 API 令牌（不能登录管理台或执行写操作）
@@ -955,15 +1067,15 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --log-dir=logs      日志目录
 --lock-file=...     单实例锁路径
 --timeout-sec=60    导航超时
---wake-wait-sec=45  等待唤醒上限
+--wake-wait-sec=30  等待唤醒上限
 --settle-sec=6      就绪后停留
 --retries=2         单目标重试次数
 --retry-delay-sec=60 重试间隔
 --not-ready-regex=  追加的「未就绪」正则
---dump-failures=false  关闭失败现场落盘
+--dump-failures     开启失败现场落盘（默认关闭，等价 DUMP_FAILURES=true）
 ```
 
-环境变量：`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。网页目标的代理模式、代理地址、用户名、密码和绕过列表通过管理 API 配置，不需要为每个目标新增环境变量。
+环境变量：`SCHEDULE_TIMEZONE`、`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`MAX_KEEP_OPEN_SESSIONS`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`STATS_FILE`、`PUBLIC_STATUS`、`WEBHOOK_URL`、`WEBHOOK_MIN_INTERVAL_SEC`、`WEBHOOK_TIMEOUT_SEC`、`WEBHOOK_FAILURE_THRESHOLD`、`BLOCK_RESOURCES`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。网页目标的代理模式、代理地址、用户名、密码和绕过列表通过管理 API 配置，不需要为每个目标新增环境变量。
 
 备份脚本另外读取 `BACKUP_PASSPHRASE` 或 `BACKUP_PASSPHRASE_FILE`；这两个变量不会被保活进程使用。
 

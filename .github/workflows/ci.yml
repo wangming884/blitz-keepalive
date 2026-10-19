@@ -32,12 +32,7 @@ jobs:
 
       - name: Syntax check
         run: |
-          node --check keepalive.mjs
-          node --check public/app.js
-          node --check test/fake-blitz.mjs
-          node --check test/admin-smoke.mjs
-          node --check test/hardening.mjs
-          node --check deploy/backup-crypto.mjs
+          npm run check
           bash -n deploy/backup.sh
           bash -n deploy/server/restore-drill.sh
 

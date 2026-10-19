@@ -194,6 +194,7 @@ async function main() {
   const adminPasswordFile = path.join(dataDir, 'admin-auth.json');
   const targetSecretKeyFile = path.join(dataDir, 'target-secrets.key');
   const runtimeStateFile = path.join(dataDir, 'runtime-state.json');
+  const statsFile = path.join(dataDir, 'stats.json');
   const lockFile = path.join(tempDir, 'keepalive.lock');
 
   const appPort = await getFreePort();
@@ -220,6 +221,7 @@ async function main() {
     `--admin-password-file=${adminPasswordFile}`,
     `--target-secret-key-file=${targetSecretKeyFile}`,
     `--runtime-state-file=${runtimeStateFile}`,
+    `--stats-file=${statsFile}`,
     `--log-dir=${logDir}`,
     `--lock-file=${lockFile}`,
     '--interval-min=20',

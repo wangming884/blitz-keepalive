@@ -20,9 +20,11 @@ const WAKE_DELAY_MS = Number(process.env.WAKE_DELAY_MS ?? 2000);
 const APP_PASSWORD = process.env.APP_PASSWORD ?? '';
 const SESSION_COOKIE = 'fake_session=authenticated';
 const MAX_FORM_BYTES = 4 * 1024;
+const LOGIN_REDIRECT_STATUS = Number(process.env.LOGIN_REDIRECT_STATUS ?? 303);
 
 let lastBrowserVisit = 0;
 let state = 'sleeping'; // sleeping | waking | online
+const gatewayOnceSeen = new Map();
 
 const wakePage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Waking up</title>
@@ -77,6 +79,17 @@ function sendHtml(res, status, body, headers = {}) {
   res.end(body);
 }
 
+function gatewayErrorPage(status) {
+  const labels = {
+    502: '502 Bad Gateway',
+    503: '503 Service Unavailable',
+    504: '504 Gateway Timeout',
+  };
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>${labels[status]}</title></head>
+<body><h1>${labels[status]}</h1><p>The simulated gateway is not ready.</p></body></html>`;
+}
+
 function readFormBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -114,6 +127,29 @@ createServer((req, res) => {
       }),
     );
   }
+  const requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+  const gateway = requestUrl.searchParams.get('gateway');
+  const gatewayStatus = Number(String(gateway ?? '').replace(/-once$/, ''));
+  if ([502, 503, 504].includes(gatewayStatus)) {
+    if (gateway?.endsWith('-once')) {
+      const key = requestUrl.pathname + requestUrl.search;
+      const seen = gatewayOnceSeen.get(key) ?? 0;
+      if (seen === 0) {
+        gatewayOnceSeen.set(key, 1);
+        sendHtml(res, gatewayStatus, gatewayErrorPage(gatewayStatus));
+        return;
+      }
+    } else {
+      sendHtml(res, gatewayStatus, gatewayErrorPage(gatewayStatus));
+      return;
+    }
+  }
+
+  if (requestUrl.searchParams.get('errorBody') === '503') {
+    sendHtml(res, 200, gatewayErrorPage(503));
+    return;
+  }
+
   const mode = req.headers['sec-fetch-mode'];
   const ua = String(req.headers['user-agent'] ?? '');
   // Chrome sends Sec-Fetch-* only to trustworthy origins, so a plain-HTTP test
@@ -149,10 +185,16 @@ createServer((req, res) => {
             sendHtml(res, 401, loginPage('Incorrect password.'));
             return;
           }
-          sendHtml(res, 303, '', {
-            location: '/',
-            'set-cookie': `${SESSION_COOKIE}; HttpOnly; Path=/; SameSite=Strict`,
-          });
+          if ([502, 503, 504].includes(LOGIN_REDIRECT_STATUS)) {
+            sendHtml(res, LOGIN_REDIRECT_STATUS, gatewayErrorPage(LOGIN_REDIRECT_STATUS), {
+              'set-cookie': `${SESSION_COOKIE}; HttpOnly; Path=/; SameSite=Strict`,
+            });
+          } else {
+            sendHtml(res, 303, '', {
+              location: '/',
+              'set-cookie': `${SESSION_COOKIE}; HttpOnly; Path=/; SameSite=Strict`,
+            });
+          }
         })
         .catch((error) => {
           const status = error.statusCode === 413 ? 413 : 400;
