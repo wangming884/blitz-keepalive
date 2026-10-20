@@ -732,7 +732,11 @@ export function createKeepOpenManager(
 
         if (target.keepOpenManual) {
           if (!sessions.has(target.id)) {
-            await tryStartFromTick(target, 'manual', nowMs, timeZone);
+            // Starting a session launches Chromium (5–30s). Awaiting it here
+            // would stall the scheduler loop, delaying every due visit.
+            // startTargetStay() registers the session synchronously, so the
+            // next tick already sees it and cannot double-start.
+            void tryStartFromTick(target, 'manual', nowMs, timeZone);
           }
           return;
         }
@@ -740,7 +744,7 @@ export function createKeepOpenManager(
         const inWindow = isKeepOpenWindowActive(target, nowMs, timeZone);
         const isRunning = sessions.has(target.id);
         if (inWindow && !isRunning && !isSuppressedWindow(target, nowMs, timeZone)) {
-          await tryStartFromTick(target, 'scheduled', nowMs, timeZone);
+          void tryStartFromTick(target, 'scheduled', nowMs, timeZone);
         } else if (!inWindow && isRunning && sessionIsScheduled(target.id)) {
           await stopTargetStay(target.id, 'window-ended');
         }

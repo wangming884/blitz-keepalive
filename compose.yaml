@@ -19,6 +19,7 @@ services:
       INTERVAL_MIN: 20
       JITTER_MIN: 2
       SCHEDULE_TIMEZONE: ${SCHEDULE_TIMEZONE:-Asia/Shanghai}
+      # 1g memory profile: one Chromium at a time. See compose.server.yaml for 2.
       MAX_CONCURRENT: 1
       MAX_KEEP_OPEN_SESSIONS: ${MAX_KEEP_OPEN_SESSIONS:-1}
       PORT: 8090
@@ -33,7 +34,7 @@ services:
       PUBLIC_STATUS: ${PUBLIC_STATUS:-false}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_MIN_INTERVAL_SEC: ${WEBHOOK_MIN_INTERVAL_SEC:-900}
-      WEBHOOK_FAILURE_THRESHOLD: ${WEBHOOK_FAILURE_THRESHOLD:-3}
+      WEBHOOK_FAILURE_THRESHOLD: ${WEBHOOK_FAILURE_THRESHOLD:-1}
       BLOCK_RESOURCES: ${BLOCK_RESOURCES:-}
     ports:
       - "8090:8090"

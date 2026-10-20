@@ -334,8 +334,18 @@
           </div>
           <div class="field">
             <label for="target-wake-wait">常规唤醒等待（秒）</label>
-            <input id="target-wake-wait" name="wakeWaitSec" type="number" min="5" max="300" step="1" value="30">
+            <input id="target-wake-wait" name="wakeWaitSec" type="number" min="5" max="300" step="1" value="90">
             <small>日常巡检遇到 503 或休眠时的等待与探活时间（5–300 秒）。</small>
+          </div>
+          <div class="field">
+            <label for="target-wake-extension">唤醒延长（秒）</label>
+            <input id="target-wake-extension" name="wakeExtensionSec" type="number" min="0" max="600" step="1" value="0">
+            <small>页面仍显示「正在唤醒」时额外等待（0 关闭；冷启动慢的应用建议 60–180 秒）。</small>
+          </div>
+          <div class="field">
+            <label for="target-min-ready-text">最小正文长度</label>
+            <input id="target-min-ready-text" name="minReadyTextLength" type="number" min="0" max="100000" step="1" value="0">
+            <small>正文少于该字符数视为未就绪，用于识别只渲染空壳的唤醒页（0 关闭）。</small>
           </div>
           <div class="field field-wide">
             <label for="target-expect">期望文本</label>

@@ -12,7 +12,14 @@ import {
   normalizeScheduleFields,
   getScheduleState,
   getNextWindowStart,
+  MAX_VISIT_WINDOW_MIN,
+  scheduleNext as scheduleNextPure,
 } from './schedule.mjs';
+import {
+  DEFAULT_NOT_READY_PATTERNS,
+  classify,
+  targetReadinessIssues,
+} from './page-state.mjs';
 import {
   KeepOpenCapacityError,
   createKeepOpenManager,
@@ -26,6 +33,8 @@ import {
   parseTargetUrlAllowlist,
   parseTrustedProxyCidrs,
   validateTargetUrl,
+  resolveTargetUrl,
+  buildResolverRules,
 } from './urlguard.mjs';
 import { createNotifier } from './notify.mjs';
 import { createStatsStore } from './stats.mjs';
@@ -81,10 +90,10 @@ import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
 const MINUTE = 60_000;
-const MAX_VISIT_WINDOW_MIN = 28; // interval + jitter must stay below blitz.cloud's 30-minute sleep
 const MAX_INTERVAL_MIN = MAX_VISIT_WINDOW_MIN;
 const MAX_JITTER_MIN = 10;
 const LOCK_STALE_MS = 15 * MINUTE;
+const BROWSER_CLOSE_TIMEOUT_MS = 5_000;
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
 const MAX_RECENT_LOGS = 100;
 const MAX_MANAGED_TARGETS = 100;
@@ -119,15 +128,20 @@ const LOGIN_LOCK_MS = 5 * MINUTE;
 const LOGIN_MAX_FAILURES = 5;
 const AUTH_FAILURE_PAUSE_THRESHOLD = 3;
 const AUTH_FAILURE_PAUSE_MS = 30 * MINUTE;
-const READINESS_FAILURE_THRESHOLD = 3;
-const READINESS_GRACE_MS = 10 * MINUTE;
-const FAILURE_BACKOFF_MAX_MULTIPLIER = 4;
+// A single visit can legitimately take up to ~6 minutes (navigation + wake
+// window). Ten minutes without any scheduler progress means the loop is stuck,
+// not merely busy.
+const SCHEDULER_STALL_MS = 10 * MINUTE;
+// nextDue is an absolute timestamp, so a backwards clock step (NTP correction,
+// manual change) pushes every target into the far future and keep-alive silently
+// stops. Anything beyond this tolerance counts as a clock step, not drift.
+const CLOCK_REWIND_TOLERANCE_MS = 1_000;
 const TARGET_LOGIN_SUCCESS_SELECTOR_MAX_LENGTH = 300;
 const FAILURE_DUMP_CLEANUP_INTERVAL_MS = 6 * 60 * MINUTE;
 const VISIT_DURATION_BUCKETS_SEC = [1, 2, 5, 10, 20, 30, 60, 120, 300];
 const DEFAULT_WEBHOOK_MIN_INTERVAL_SEC = 900;
 const DEFAULT_WEBHOOK_TIMEOUT_SEC = 10;
-const DEFAULT_WEBHOOK_FAILURE_THRESHOLD = 3;
+const DEFAULT_WEBHOOK_FAILURE_THRESHOLD = 1;
 // A probe is an interactive diagnostic: navigation, wake wait and login
 // navigation each have their own timeout, so the watchdog below is only the sum
 // of those budgets plus slack. It exists to bound a page/browser that stops
@@ -165,18 +179,7 @@ const SECURITY_HEADERS = {
 };
 
 /** Pages served by blitz.cloud while the app is not answering yet. */
-const DEFAULT_NOT_READY_PATTERNS = [
-  /app\s+is\s+asleep/i,
-  /app\s+is\s+sleeping/i,
-  /is\s+asleep\s+right\s+now/i,
-  /waking\s+(?:it\s+|the\s+app\s+)?up/i,
-  /wakes?\s+in\s+(?:a\s+)?few\s+seconds/i,
-  /app\s+is\s+(?:paused|stopped|starting|building|updating)/i,
-  /needs\s+attention/i,
-  /503\s+service\s+(?:temporarily\s+)?unavailable/i,
-  /502\s+bad\s+gateway/i,
-  /504\s+gateway\s+timeout/i,
-];
+
 
 const CHROME_CANDIDATES = {
   win32: [
@@ -244,6 +247,24 @@ let stopping = false;
 const ACTIVE_BROWSERS = new Set();
 const STOP_WAITERS = new Set();
 let runtimeStateStore = null;
+
+/**
+ * Keeps the historical call signature while the computation itself lives in
+ * schedule.mjs (where it can be unit-tested without booting the runtime).
+ */
+function scheduleNext(
+  target,
+  opts = {},
+  now = Date.now(),
+  timeZone = DEFAULT_SCHEDULE_TIMEZONE,
+) {
+  return scheduleNextPure(
+    target,
+    { ...opts, onScheduled: () => runtimeStateStore?.schedule() },
+    now,
+    timeZone,
+  );
+}
 let statsStore = null;
 let probeInFlight = false;
 
@@ -251,10 +272,65 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Counting semaphore shared by every sweep.
+ *
+ * Sweeps no longer run one at a time: a slow target must not delay a target that
+ * becomes due while the first sweep is still retrying. The concurrency cap still
+ * has to be global, otherwise N concurrent sweeps would each spawn maxConcurrent
+ * Chromium instances.
+ */
+function createSemaphore(limit) {
+  const max = Math.max(1, Math.trunc(Number(limit)) || 1);
+  let active = 0;
+  const waiters = [];
+  return {
+    acquire() {
+      if (active < max) {
+        active += 1;
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => waiters.push(resolve));
+    },
+    release() {
+      const next = waiters.shift();
+      // Hand the permit straight to the next waiter instead of decrementing.
+      if (next) next();
+      else active = Math.max(0, active - 1);
+    },
+    get activeCount() {
+      return active;
+    },
+    get pendingCount() {
+      return waiters.length;
+    },
+  };
+}
+
 async function closeBrowser(browser) {
   if (!browser) return;
   ACTIVE_BROWSERS.delete(browser);
-  await browser.close().catch(() => {});
+  // browser.close() waits for the Chrome process to exit. If that process is
+  // wedged it never resolves, and because every visit awaits this in its
+  // finally block, one stuck browser would freeze the whole scheduler while
+  // /healthz still answers 200. Bound it and kill the child as a last resort.
+  let timer = null;
+  const closed = browser.close().catch(() => 'closed');
+  const timedOut = await Promise.race([
+    closed.then(() => false),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(true), BROWSER_CLOSE_TIMEOUT_MS);
+      timer.unref?.();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (!timedOut) return;
+  try {
+    const child = browser.process();
+    if (child && !child.killed) child.kill('SIGKILL');
+  } catch {
+    // The process may already be gone; nothing left to clean up.
+  }
 }
 
 function requestStop() {
@@ -1022,6 +1098,17 @@ function normalizeTarget(raw, globals, index) {
         min: 5,
         max: 300,
       }) * 1000,
+    wakeExtensionMs:
+      toNumber(
+        raw.wakeExtensionSec ?? globals.wakeExtensionSec,
+        `targets[${index}].wakeExtensionSec`,
+        { min: 0, max: 600 },
+      ) * 1000,
+    minReadyTextLength: toNumber(
+      raw.minReadyTextLength ?? globals.minReadyTextLength,
+      `targets[${index}].minReadyTextLength`,
+      { min: 0, max: 100_000 },
+    ),
     settleMs:
       toNumber(raw.settleSec ?? globals.settleSec, `targets[${index}].settleSec`, {
         min: 0,
@@ -1195,6 +1282,10 @@ function buildManagedTarget(
   const timeoutSec = raw.timeoutSec ?? previousRecord?.timeoutSec;
   const settleSec = raw.settleSec ?? previousRecord?.settleSec;
   const retries = raw.retries ?? previousRecord?.retries;
+  const wakeExtensionSec =
+    raw.wakeExtensionSec ?? previousRecord?.wakeExtensionSec ?? undefined;
+  const minReadyTextLength =
+    raw.minReadyTextLength ?? previousRecord?.minReadyTextLength ?? undefined;
   const expect = raw.expect ?? previousRecord?.expect ?? '';
   const loginSuccessSelector =
     raw.loginSuccessSelector ?? previousRecord?.loginSuccessSelector ?? '';
@@ -1394,6 +1485,8 @@ function buildManagedTarget(
         ...(timeoutSec !== undefined ? { timeoutSec } : {}),
         ...(settleSec !== undefined ? { settleSec } : {}),
         ...(retries !== undefined ? { retries } : {}),
+        ...(wakeExtensionSec !== undefined ? { wakeExtensionSec } : {}),
+        ...(minReadyTextLength !== undefined ? { minReadyTextLength } : {}),
         proxyMode,
         ...scheduleFields,
         ...keepOpenFields,
@@ -1462,6 +1555,12 @@ function buildManagedTarget(
     timeoutSec: Math.round(target.timeoutMs / 1000),
     settleSec: Math.round(target.settleMs / 1000),
     retries: target.retries,
+    ...(Number(target.wakeExtensionMs) > 0
+      ? { wakeExtensionSec: Math.round(target.wakeExtensionMs / 1000) }
+      : {}),
+    ...(Number(target.minReadyTextLength) > 0
+      ? { minReadyTextLength: Number(target.minReadyTextLength) }
+      : {}),
     expect: target.expectText,
     ...(target.loginSuccessSelector
       ? { loginSuccessSelector: target.loginSuccessSelector }
@@ -1632,10 +1731,30 @@ function loadConfig() {
       min: 5,
       max: 300,
     }) ?? 60,
+    // 90s covers the cold starts we see on blitz.cloud (the wake page alone can
+    // sit there for a minute). The old 30s default regularly gave up while the
+    // app was still booting, which showed up as "not-ready-timeout" failures
+    // even though the site was fine a few seconds later.
     wakeWaitSec: toNumber(args['wake-wait-sec'] ?? process.env.WAKE_WAIT_SEC ?? fileDefaults.wakeWaitSec, 'wakeWaitSec', {
       min: 5,
       max: 300,
-    }) ?? 30,
+    }) ?? 90,
+    // Extra budget granted only while the page still looks like a wake page.
+    // 0 disables it; raise it for apps that need several minutes to boot.
+    wakeExtensionSec: toNumber(
+      args['wake-extension-sec'] ?? process.env.WAKE_EXTENSION_SEC ?? fileDefaults.wakeExtensionSec,
+      'wakeExtensionSec',
+      { min: 0, max: 600 },
+    ) ?? 0,
+    // Minimum visible text length before a page counts as ready. 0 disables the
+    // check; useful for apps whose wake page renders a thin shell.
+    minReadyTextLength: toNumber(
+      args['min-ready-text-length'] ??
+        process.env.MIN_READY_TEXT_LENGTH ??
+        fileDefaults.minReadyTextLength,
+      'minReadyTextLength',
+      { min: 0, max: 100_000 },
+    ) ?? 0,
     settleSec: toNumber(args['settle-sec'] ?? process.env.SETTLE_SEC ?? fileDefaults.settleSec, 'settleSec', {
       min: 0,
       max: 60,
@@ -1739,11 +1858,14 @@ function loadConfig() {
     // Runtime defaults are also needed when web-managed targets are created or
     // updated after startup; keep them separate from the public config fields.
     globals,
+    // Two workers keep one slow/cold-starting target from monopolising the
+    // whole sweep. Each worker owns a Chromium instance (~300-500MB), so
+    // memory-constrained hosts should pin this to 1 explicitly.
     maxConcurrent: toNumber(
       args['max-concurrent'] ?? process.env.MAX_CONCURRENT ?? fileConfig.maxConcurrent,
       'maxConcurrent',
       { min: 1, max: 5 },
-    ) ?? 1,
+    ) ?? 2,
     maxKeepOpenSessions: toNumber(
       args['max-keep-open-sessions'] ??
         process.env.MAX_KEEP_OPEN_SESSIONS ??
@@ -2023,21 +2145,6 @@ function createRuntimeStateStore(cfg, log) {
   };
 }
 
-function classify(target, state, { requireExpect = true, status = null } = {}) {
-  if (status === 503 || status === 502 || status === 504) {
-    return { awake: false, reason: `not-ready:http-${status}` };
-  }
-  if (state.ready !== 'complete') return { awake: false, reason: 'loading' };
-  if (!state.text) return { awake: false, reason: 'empty-page' };
-  for (const pattern of target.notReadyPatterns) {
-    if (pattern.test(state.text)) return { awake: false, reason: `not-ready:${pattern.source}` };
-  }
-  if (requireExpect && target.expectText && !state.text.includes(target.expectText)) {
-    return { awake: false, reason: 'expect-text-missing' };
-  }
-  return { awake: true, reason: 'ready' };
-}
-
 async function readPageState(page) {
   return page.evaluate(() => ({
     title: document.title || '',
@@ -2061,11 +2168,25 @@ async function waitForApp(
     timeoutMs = target.timeoutMs,
   } = {},
 ) {
-  const deadline = Date.now() + wakeWaitMs;
+  // Wake pages are served with HTTP 200 and real text, so "wait until it looks
+  // ready" is not enough — the app itself can need far longer than wakeWaitSec
+  // to finish booting. When the target opts into wakeExtensionMs, a page that
+  // still looks like a wake page keeps buying more time (rolling 15s windows)
+  // up to a hard ceiling, instead of being reported as a failure at wakeWaitMs.
+  const wakeExtensionMs = Math.max(0, Number(target.wakeExtensionMs) || 0);
+  const startedAt = Date.now();
+  const hardDeadline = startedAt + wakeWaitMs + wakeExtensionMs;
+  let deadline = startedAt + wakeWaitMs;
   let currentStatus = initialStatus;
   let state = { title: '', text: '', ready: 'loading' };
   let verdict = { awake: false, reason: 'loading' };
   let lastReloadAt = Date.now();
+  const looksLikeWakePage = () =>
+    currentStatus === 503 ||
+    currentStatus === 502 ||
+    currentStatus === 504 ||
+    verdict.reason.startsWith('not-ready:') ||
+    verdict.reason === 'page-too-short';
   for (;;) {
     try {
       state = await readPageState(page);
@@ -2076,6 +2197,9 @@ async function waitForApp(
       verdict = { awake: false, reason: `navigating:${error.message.slice(0, 80)}` };
     }
     if (verdict.awake) return { ...verdict, ...state, status: currentStatus };
+    if (wakeExtensionMs > 0 && looksLikeWakePage()) {
+      deadline = Math.min(hardDeadline, Math.max(deadline, Date.now() + 15_000));
+    }
     if (Date.now() >= deadline) {
       // "loading"/"navigating:*" only describe why the last poll failed; after
       // the wake window expires the actionable reason is that the app never
@@ -2092,11 +2216,7 @@ async function waitForApp(
       };
     }
 
-    const isWaking =
-      currentStatus === 503 ||
-      currentStatus === 502 ||
-      currentStatus === 504 ||
-      verdict.reason.startsWith('not-ready:');
+    const isWaking = looksLikeWakePage();
 
     if (isWaking && Date.now() - lastReloadAt >= 4_000) {
       lastReloadAt = Date.now();
@@ -2588,7 +2708,7 @@ async function openTargetPage(cfg, target, browser, options = {}) {
     };
   }
 }
-function browserLaunchArgs(cfg, target) {
+function browserLaunchArgs(cfg, target, resolverRules = null) {
   const args = [
     '--disable-dev-shm-usage',
     '--disable-gpu',
@@ -2614,6 +2734,11 @@ function browserLaunchArgs(cfg, target) {
   } else {
     // direct and inherit-without-global-proxy must not fall back to system/env proxy.
     args.push('--no-proxy-server');
+    // Pin the hostname to the addresses that passed validation. Without this the
+    // browser resolves the name again at connect time, so a DNS answer that
+    // changes in between could point it at a private address (rebinding).
+    // Proxied targets skip the pin: the proxy resolves, not the browser.
+    if (resolverRules) args.push(`--host-resolver-rules=${resolverRules}`);
   }
   return args;
 }
@@ -2624,12 +2749,17 @@ function browserLaunchArgs(cfg, target) {
  * must never touch runtime state, scheduling or the statistics store.
  */
 async function probeTarget(cfg, target, { timeoutMs, wakeWaitMs, deadlineMs } = {}) {
-  await validateTargetUrl(target.url, cfg);
+  const { hostname: pinnedHost, addresses: pinnedAddresses } = await resolveTargetUrl(
+    target.url,
+    cfg,
+  );
   const startedAt = Date.now();
   const effectiveTimeout = timeoutMs ?? Math.min(target.timeoutMs, 30_000);
   // A probe is an interactive diagnostic; never block an HTTP request for the
-  // full first-visit wake window (up to 300s).
-  const effectiveWakeWait = wakeWaitMs ?? Math.min(target.wakeWaitMs, 60_000);
+  // full first-visit wake window (up to 300s). The 90s cap matches the default
+  // wakeWaitSec so the button agrees with what the scheduler would do — capping
+  // it lower made probes report "not ready" for apps the scheduler handles fine.
+  const effectiveWakeWait = wakeWaitMs ?? Math.min(target.wakeWaitMs, 90_000);
   const budgetMs = Math.max(
     PROBE_DEADLINE_FLOOR_MS,
     Math.min(
@@ -2644,7 +2774,7 @@ async function probeTarget(cfg, target, { timeoutMs, wakeWaitMs, deadlineMs } = 
     executablePath: cfg.chromePath,
     headless: cfg.headless,
     defaultViewport: { width: 1366, height: 900 },
-    args: browserLaunchArgs(cfg, target),
+    args: browserLaunchArgs(cfg, target, buildResolverRules(pinnedHost, pinnedAddresses)),
   });
   ACTIVE_BROWSERS.add(browser);
 
@@ -2739,8 +2869,13 @@ async function visitOnce(
   target,
   { timeoutMs = target.timeoutMs, wakeWaitMs = target.wakeWaitMs } = {},
 ) {
-  await validateTargetUrl(target.url, cfg);
-  const args = browserLaunchArgs(cfg, target);
+  // resolveTargetUrl validates (allowlist + private address) and hands back the
+  // addresses so the browser can be pinned to them.
+  const { hostname: pinnedHost, addresses: pinnedAddresses } = await resolveTargetUrl(
+    target.url,
+    cfg,
+  );
+  const args = browserLaunchArgs(cfg, target, buildResolverRules(pinnedHost, pinnedAddresses));
 
   const browser = await puppeteer.launch({
     executablePath: cfg.chromePath,
@@ -2795,6 +2930,9 @@ function createStatus(cfg) {
     lastVisitOk: null,
     lastTarget: null,
     lastError: null,
+    // Heartbeat for the scheduler loop. A frozen loop keeps /healthz green while
+    // no target is ever visited again, so /readyz and /metrics watch this.
+    lastLoopAt: Date.now(),
   };
 }
 
@@ -3208,57 +3346,7 @@ function publicVisit(visit) {
   };
 }
 
-function targetReadinessIssues(
-  target,
-  now = Date.now(),
-  timeZone = DEFAULT_SCHEDULE_TIMEZONE,
-  keepOpenManager = null,
-) {
-  if (target.paused) return [];
 
-  const issues = [];
-  const consecutiveFailures = Math.max(0, Number(target.consecutiveFailures) || 0);
-  if (consecutiveFailures >= READINESS_FAILURE_THRESHOLD) {
-    issues.push('consecutive-failures');
-  }
-
-  const scheduleState = getScheduleState(target, now, timeZone);
-  const keepOpenActive =
-    keepOpenManager?.isSessionActive(target.id) === true || target.keepOpenActive === true;
-  if (!scheduleState.scheduledOff && !keepOpenActive) {
-    const nextDue = Number(target.nextDue);
-    if (
-      !target.running &&
-      !target.schedulerQueued &&
-      Number.isFinite(nextDue) &&
-      nextDue > 0 &&
-      now - nextDue > READINESS_GRACE_MS
-    ) {
-      issues.push('schedule-overdue');
-    }
-
-    const lastSuccessfulVisitAt = Date.parse(target.lastSuccessfulVisitAt ?? '');
-    // Wall-clock staleness is misleading inside a narrow daily window: at 09:00
-    // the last success is legitimately yesterday's, so a target that only runs
-    // 09:00-10:00 would look stale for the first minutes of every window. The
-    // window start restarts the clock and gives the target a full budget.
-    const windowStartMs = Number(scheduleState.windowStartMs);
-    const freshnessBaseline = Math.max(
-      Number.isFinite(lastSuccessfulVisitAt) ? lastSuccessfulVisitAt : 0,
-      Number.isFinite(windowStartMs) ? windowStartMs : 0,
-    );
-    if (
-      freshnessBaseline > 0 &&
-      now - freshnessBaseline >
-        target.intervalMs * FAILURE_BACKOFF_MAX_MULTIPLIER +
-          target.jitterMs +
-          READINESS_GRACE_MS
-    ) {
-      issues.push('stale-success');
-    }
-  }
-  return issues;
-}
 
 function buildReadinessPayload(cfg, now = Date.now(), keepOpenManager = null) {
   const activeTargets = cfg.targets.filter(
@@ -3317,6 +3405,8 @@ function publicTargetRuntime(target, cfg = null, keepOpenManager = null) {
     overdue: readinessIssues.includes('schedule-overdue'),
     readinessIssues,
     wakeWaitSec: Math.round(target.wakeWaitMs / 1000),
+    wakeExtensionSec: Math.round((Number(target.wakeExtensionMs) || 0) / 1000),
+    minReadyTextLength: Math.max(0, Number(target.minReadyTextLength) || 0),
     proxyMode: target.proxyMode ?? (target.proxy ? 'custom' : 'direct'),
     proxyUsername: target.proxyUsername || null,
     proxyBypass: target.proxy?.bypass || null,
@@ -3375,11 +3465,19 @@ function prometheusLabelValue(value) {
 }
 
 function buildMetrics(cfg, status, controls, keepOpenManager = null) {
+  const now = Date.now();
   const memory = process.memoryUsage();
-  const uptimeSec = Math.max(0, Math.round((Date.now() - Date.parse(status.startedAt)) / 1000));
+  const uptimeSec = Math.max(0, Math.round((now - Date.parse(status.startedAt)) / 1000));
   const schedulerQueued = cfg.targets.filter((target) => target.schedulerQueued).length;
   const queueLength = schedulerQueued + controls.pendingCount();
-  const readiness = buildReadinessPayload(cfg, Date.now(), keepOpenManager);
+  const readiness = buildReadinessPayload(cfg, now, keepOpenManager);
+  const loopAgeSec = Math.max(0, Math.round((now - (status.lastLoopAt ?? now)) / 1000));
+  const dueTimes = cfg.targets
+    .filter((target) => !target.paused && Number.isFinite(target.nextDue) && target.nextDue > 0)
+    .map((target) => target.nextDue);
+  const lagSec = dueTimes.length
+    ? Math.max(0, Math.round((now - Math.min(...dueTimes)) / 1000))
+    : 0;
   const lines = [
     '# HELP blitz_keepalive_up Whether the keep-alive process is running.',
     '# TYPE blitz_keepalive_up gauge',
@@ -3408,11 +3506,25 @@ function buildMetrics(cfg, status, controls, keepOpenManager = null) {
     '# HELP blitz_keepalive_uptime_seconds Process uptime in seconds.',
     '# TYPE blitz_keepalive_uptime_seconds gauge',
     `blitz_keepalive_uptime_seconds ${uptimeSec}`,
+    '# HELP blitz_keepalive_scheduler_loop_age_seconds Seconds since the scheduler loop last made progress.',
+    '# TYPE blitz_keepalive_scheduler_loop_age_seconds gauge',
+    `blitz_keepalive_scheduler_loop_age_seconds ${loopAgeSec}`,
+    '# HELP blitz_keepalive_scheduler_lag_seconds How far the most overdue active target is behind schedule.',
+    '# TYPE blitz_keepalive_scheduler_lag_seconds gauge',
+    `blitz_keepalive_scheduler_lag_seconds ${lagSec}`,
+    '# HELP blitz_keepalive_visit_permits_active Visit permits currently held.',
+    '# TYPE blitz_keepalive_visit_permits_active gauge',
+    `blitz_keepalive_visit_permits_active ${status.visitPermits?.activeCount ?? 0}`,
+    '# HELP blitz_keepalive_visit_permits_pending Visits waiting for a permit.',
+    '# TYPE blitz_keepalive_visit_permits_pending gauge',
+    `blitz_keepalive_visit_permits_pending ${status.visitPermits?.pendingCount ?? 0}`,
   ];
 
   lines.push(
     '# HELP blitz_keepalive_target_last_success_timestamp_seconds Unix timestamp of the last successful target visit.',
     '# TYPE blitz_keepalive_target_last_success_timestamp_seconds gauge',
+    '# HELP blitz_keepalive_target_last_success_age_seconds Seconds since the last successful visit, -1 when it never succeeded.',
+    '# TYPE blitz_keepalive_target_last_success_age_seconds gauge',
     '# HELP blitz_keepalive_target_consecutive_failures Number of consecutive failed target visits.',
     '# TYPE blitz_keepalive_target_consecutive_failures gauge',
     '# HELP blitz_keepalive_target_next_due_timestamp_seconds Unix timestamp when the target is next due.',
@@ -3425,6 +3537,16 @@ function buildMetrics(cfg, status, controls, keepOpenManager = null) {
   for (const target of cfg.targets) {
     const label = `target="${prometheusLabelValue(target.id)}"`;
     const lastSuccessfulAt = Date.parse(target.lastSuccessfulVisitAt ?? '');
+    // A keep-open session replaces scheduled visits, so lastSuccessfulVisitAt
+    // stops moving while the target is legitimately being held open. Use the
+    // session heartbeat as the freshness signal instead, otherwise a healthy
+    // keep-open target looks stale forever and trips last_success_age alerts.
+    const stayStatus = keepOpenManager?.getTargetStayStatus?.(target.id);
+    const lastHeartbeatAt = Date.parse(stayStatus?.lastHeartbeatAt ?? '');
+    const freshnessCandidates = [];
+    if (Number.isFinite(lastSuccessfulAt)) freshnessCandidates.push(lastSuccessfulAt);
+    if (stayStatus?.active && Number.isFinite(lastHeartbeatAt)) freshnessCandidates.push(lastHeartbeatAt);
+    const freshnessAt = freshnessCandidates.length ? Math.max(...freshnessCandidates) : NaN;
     const nextDue = Number(target.nextDue);
     const overdue = targetReadinessIssues(
       target,
@@ -3435,6 +3557,9 @@ function buildMetrics(cfg, status, controls, keepOpenManager = null) {
     lines.push(
       `blitz_keepalive_target_last_success_timestamp_seconds{${label}} ${
         Number.isFinite(lastSuccessfulAt) ? lastSuccessfulAt / 1000 : 0
+      }`,
+      `blitz_keepalive_target_last_success_age_seconds{${label}} ${
+        Number.isFinite(freshnessAt) ? Math.max(0, Math.round((now - freshnessAt) / 1000)) : -1
       }`,
       `blitz_keepalive_target_consecutive_failures{${label}} ${
         Math.max(0, Number(target.consecutiveFailures) || 0)
@@ -3560,10 +3685,14 @@ function createTargetManager(cfg, status, controls, keepOpenManager = null) {
       url: record.url,
       intervalMin: record.intervalMin,
       jitterMin: record.jitterMin,
-      wakeWaitSec: record.wakeWaitSec ?? 30,
+      wakeWaitSec: record.wakeWaitSec ?? 90,
       timeoutSec: record.timeoutSec ?? 60,
       settleSec: record.settleSec ?? 6,
       retries: record.retries ?? 2,
+      // Export is a whitelist: anything missing here is silently dropped from
+      // the backup and from a subsequent import round-trip.
+      ...(record.wakeExtensionSec ? { wakeExtensionSec: record.wakeExtensionSec } : {}),
+      ...(record.minReadyTextLength ? { minReadyTextLength: record.minReadyTextLength } : {}),
       expect: record.expect,
       ...(record.loginSuccessSelector
         ? { loginSuccessSelector: record.loginSuccessSelector }
@@ -3920,6 +4049,10 @@ async function buildOverview(cfg, status, log, controls, admin, keepOpenManager 
       intervalMin: Math.round(target.intervalMs / MINUTE),
       jitterMin: Math.round(target.jitterMs / MINUTE),
       wakeWaitSec: Math.round(target.wakeWaitMs / 1000),
+      // The edit dialog prefills from this payload. Omitting these would make a
+      // plain "edit and save" silently reset a configured wake extension to 0.
+      wakeExtensionSec: Math.round((Number(target.wakeExtensionMs) || 0) / 1000),
+      minReadyTextLength: Math.max(0, Number(target.minReadyTextLength) || 0),
       expect: target.expectText,
       expectConfigured: Boolean(target.expectText),
       loginPasswordConfigured: Boolean(target.loginPasswordConfigured),
@@ -3965,8 +4098,11 @@ async function buildOverview(cfg, status, log, controls, admin, keepOpenManager 
       keepOpenDurationSec: keepOpenManager?.getTargetStayStatus(target.id)?.durationSec ?? 0,
     };
   });
+  // Keep-open targets are held alive by their session, so a stale failure streak
+  // from before the session started must not keep the dashboard "degraded".
   const failing = targets.filter(
-    (target) => target.consecutiveFailures > 0 && !target.scheduledOff,
+    (target) =>
+      target.consecutiveFailures > 0 && !target.scheduledOff && !target.keepOpenActive,
   ).length;
   const visited = targets.filter((target) => target.lastVisit).length;
   const pausedTargets = targets.filter((target) => target.paused).length;
@@ -4106,7 +4242,10 @@ function buildPublicStatus(cfg, status, keepOpenManager = null) {
       totalTargets: targets.length,
       activeTargets: readiness.activeTargetCount,
       issueCount: readiness.issueCount,
-      failingTargets: targets.filter((target) => target.consecutiveFailures > 0).length,
+      failingTargets: targets.filter(
+        (target) =>
+          target.consecutiveFailures > 0 && !target.keepOpenActive && !target.scheduledOff,
+      ).length,
       pausedTargets: targets.filter((target) => target.paused).length,
       keepOpenTargets: targets.filter((target) => target.keepOpenActive).length,
     },
@@ -4151,6 +4290,18 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
   // therefore safe to use for alerting and load-balancer decisions.
   if (req.method === 'GET' && pathname === '/readyz') {
     const readiness = buildReadinessPayload(cfg, Date.now(), keepOpenManager);
+    // A wedged scheduler visits nobody, so no target accumulates new failures
+    // and the per-target checks keep reporting ready. Surface the stall itself.
+    const loopAgeMs = Date.now() - (status.lastLoopAt ?? Date.now());
+    if (!cfg.once && loopAgeMs > SCHEDULER_STALL_MS) {
+      readiness.ready = false;
+      readiness.status = 'not-ready';
+      readiness.issues = [
+        ...readiness.issues,
+        { id: 'scheduler', reasons: ['scheduler-stalled'], loopAgeSec: Math.round(loopAgeMs / 1000) },
+      ];
+      readiness.issueCount = readiness.issues.length;
+    }
     sendJson(res, readiness.ready ? 200 : 503, readiness);
     return;
   }
@@ -4656,8 +4807,18 @@ async function handleRequest(req, res, cfg, status, log, controls, admin, target
         throw error;
       }
     } else {
-      if (keepOpenManager) await keepOpenManager.stopTargetStay(target.id, 'manual');
+      // Clear the manual flag *before* stopping. stopTargetStay() removes the
+      // session first and only then closes the browser, so a scheduler tick that
+      // runs in between would see keepOpenManual=true with no session and start
+      // it again, leaving the target stuck in "挂机保持中" right after a stop.
       target.keepOpenManual = false;
+      if (keepOpenManager) await keepOpenManager.stopTargetStay(target.id, 'manual');
+      // The session itself was keeping the app alive, so there is nothing to
+      // catch up on. Re-arm the normal cadence instead of firing an immediate
+      // visit the instant the session stops (nextDue went stale during it).
+      if (!target.paused && (!Number.isFinite(target.nextDue) || target.nextDue <= Date.now())) {
+        scheduleNext(target, {}, Date.now(), cfg.scheduleTimeZone);
+      }
     }
     runtimeStateStore?.schedule();
     void log({
@@ -4839,6 +5000,9 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
   try {
     for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
       if (stopping) break;
+      // Keep the scheduler heartbeat fresh during long retry chains so a slow
+      // but healthy visit is not mistaken for a stalled loop.
+      status.lastLoopAt = Date.now();
       if (
         attempt > 1 &&
         target.scheduleEnabled &&
@@ -4985,67 +5149,67 @@ async function runTargetCycle(cfg, target, log, cycle, status) {
   return finalResult;
 }
 
-function scheduleNext(
-  target,
-  { failed = false } = {},
-  now = Date.now(),
-  timeZone = DEFAULT_SCHEDULE_TIMEZONE,
-) {
-  const multiplier = failed
-    ? Math.min(2 ** Math.max(0, target.consecutiveFailures - 1), FAILURE_BACKOFF_MAX_MULTIPLIER)
-    : 1;
-  const jitter = target.jitterMs > 0 ? Math.floor(Math.random() * target.jitterMs) : 0;
-  const delay = Math.min(
-    target.intervalMs * multiplier + jitter,
-    MAX_VISIT_WINDOW_MIN * MINUTE,
-  );
-  let nextDue = now + delay;
-
-  if (target.scheduleEnabled) {
-    const scheduleState = getScheduleState(target, now, timeZone);
-    if (scheduleState.active) {
-      if (scheduleState.windowEndMs && nextDue >= scheduleState.windowEndMs) {
-        const nextStart = getNextWindowStart(target, scheduleState.windowEndMs, timeZone);
-        if (nextStart) nextDue = nextStart;
-      }
-    } else {
-      const nextStart = getNextWindowStart(target, now, timeZone);
-      if (nextStart) nextDue = nextStart;
-    }
-  }
-
-  target.nextDue = nextDue;
-  runtimeStateStore?.schedule();
-  return Math.max(0, nextDue - now);
-}
 
 /**
  * Runs the given targets with a bounded worker pool. Each visit owns its own
  * browser process, so one hanging app cannot stall or crash the others.
  */
-async function runTargets(cfg, targets, log, cycle, status, notifier = null) {
-  const queue = targets.slice();
+async function runTargets(cfg, targets, log, cycle, status, notifier = null, semaphore = null) {
   const results = new Map();
-  const queuedTargets = new Set(queue);
+  const queuedTargets = new Set(targets);
   queuedTargets.forEach((target) => {
     target.schedulerQueued = true;
   });
-  const worker = async () => {
-    while (queue.length > 0 && !stopping) {
-      const target = queue.shift();
-      const result = await runTargetCycle(cfg, target, log, cycle, status);
+  // Every target is an independent task behind one shared permit. A sweep can
+  // therefore never exceed maxConcurrent browsers, and a second sweep started
+  // while the first is still retrying simply queues behind it instead of
+  // waiting for the whole batch to finish.
+  const limit = semaphore ?? createSemaphore(cfg.maxConcurrent);
+  const runOne = async (target) => {
+    await limit.acquire();
+    try {
+      if (stopping) return;
+      let result;
+      try {
+        result = await runTargetCycle(cfg, target, log, cycle, status);
+      } catch (error) {
+        // One target blowing up must never take down the scheduler: a rejected
+        // task would reject Promise.all -> main loop -> process.exit(1), which
+        // silently ends keep-alive for every other target.
+        target.running = false;
+        const previousFailures = Math.max(0, Number(target.consecutiveFailures) || 0);
+        target.lastResult = 'failed';
+        target.consecutiveFailures = previousFailures + 1;
+        results.set(target.id, false);
+        await log({
+          level: 'error',
+          event: 'target-cycle-crashed',
+          target: target.id,
+          account: target.account,
+          error: describeVisitError(error).reason,
+          consecutiveFailures: target.consecutiveFailures,
+        }).catch(() => {});
+        if (!cfg.once) {
+          const delay = scheduleNext(target, { failed: true }, Date.now(), cfg.scheduleTimeZone);
+          await log({
+            level: 'warn',
+            event: 'scheduled',
+            target: target.id,
+            account: target.account,
+            consecutiveFailures: target.consecutiveFailures,
+            nextVisitInMin: Math.ceil(delay / MINUTE),
+          }).catch(() => {});
+        }
+        return;
+      }
       if (result.aborted) {
         results.set(target.id, true);
-        continue;
+        return;
       }
       if (result.skipped) {
         results.set(target.id, true);
         if (!cfg.once) {
-          const scheduleState = getScheduleState(
-            target,
-            Date.now(),
-            cfg.scheduleTimeZone,
-          );
+          const scheduleState = getScheduleState(target, Date.now(), cfg.scheduleTimeZone);
           target.nextDue = scheduleState.nextStartMs ?? null;
           const nextVisitInMin = Number.isFinite(target.nextDue)
             ? Math.ceil(Math.max(0, target.nextDue - Date.now()) / MINUTE)
@@ -5060,7 +5224,7 @@ async function runTargets(cfg, targets, log, cycle, status, notifier = null) {
           });
           runtimeStateStore?.schedule();
         }
-        continue;
+        return;
       }
       const ok = Boolean(result.ok);
       results.set(target.id, ok);
@@ -5110,11 +5274,12 @@ async function runTargets(cfg, targets, log, cycle, status, notifier = null) {
         }
         runtimeStateStore?.schedule();
       }
+    } finally {
+      limit.release();
     }
   };
-  const workers = Math.min(cfg.maxConcurrent, queue.length);
   try {
-    await Promise.all(Array.from({ length: workers }, worker));
+    await Promise.all(targets.map(runOne));
   } finally {
     queuedTargets.forEach((target) => {
       target.schedulerQueued = false;
@@ -5185,6 +5350,9 @@ async function main() {
   }
   const status = createStatus(cfg);
   const controls = createRunController(cfg);
+  // One permit pool for the whole process: sweeps may overlap, browsers may not.
+  const visitSemaphore = createSemaphore(cfg.maxConcurrent);
+  status.visitPermits = visitSemaphore;
   const keepOpenManager = createKeepOpenManager(cfg, log, {
     launchBrowser: async (opts) => {
       const b = await puppeteer.launch(opts);
@@ -5301,9 +5469,37 @@ async function main() {
     let cycle = 0;
     let lastReadinessCheckAt = 0;
     let lastReadinessReady = null;
+    // A sweep can take minutes (cold start + retries), and awaiting it inline
+    // froze this loop: no other target was scheduled, keep-open windows were not
+    // evaluated, and expired pauses were not resumed until the sweep finished.
+    // Sweeps run in the background so this loop keeps evaluating keep-open
+    // windows, expired pauses and readiness while a slow target retries. Several
+    // sweeps may overlap; `schedulerQueued` keeps them from visiting the same
+    // target twice and `visitSemaphore` caps the total browser count.
+    const sweepsInFlight = new Set();
+    let lastWallClock = 0;
     while (!stopping) {
       const now = Date.now();
+      // A backwards clock step would leave nextDue in the far future and stop
+      // every visit until the clock catches up. Detect it and pull the affected
+      // targets back to a normal horizon.
+      if (lastWallClock > 0 && now < lastWallClock - CLOCK_REWIND_TOLERANCE_MS) {
+        void log({
+          level: 'warn',
+          event: 'clock-rewind',
+          deltaMs: now - lastWallClock,
+        });
+        for (const target of cfg.targets) {
+          if (target.paused || !Number.isFinite(target.nextDue)) continue;
+          const horizon = now + target.intervalMs + target.jitterMs;
+          if (target.nextDue > horizon) target.nextDue = horizon;
+        }
+        runtimeStateStore?.schedule();
+      }
+      lastWallClock = now;
+      status.lastLoopAt = now;
       await keepOpenManager.tick(cfg.targets, now, cfg.scheduleTimeZone);
+      const tickMs = Date.now() - now;
       const resumed = resumeExpiredPauses(cfg.targets);
       if (resumed.length > 0) {
         await log({ level: 'info', event: 'targets-auto-resumed', targets: resumed });
@@ -5344,6 +5540,7 @@ async function main() {
         lastReadinessReady = readiness.ready;
       }
       const manual = new Set(controls.takePending());
+      const dueStartedAt = Date.now();
       const due = cfg.targets.filter((target) => {
         if (target.paused || target.managementLocked || target.schedulerQueued) return false;
         if (keepOpenManager.isSessionActive(target.id)) return false;
@@ -5360,23 +5557,66 @@ async function main() {
       });
       if (due.length > 0) {
         cycle += 1;
-        await runTargets(cfg, due, log, cycle, status, notifier);
-        continue;
+        // Surface scheduler lag: a visit that starts long after nextDue means the
+        // loop was blocked or the wait granularity is too coarse.
+        const oldestDue = Math.min(
+          ...due.map((target) => (Number.isFinite(target.nextDue) ? target.nextDue : now)),
+        );
+        const lagMs = Math.max(0, now - oldestDue);
+        if (lagMs >= 2_000) {
+          void log({
+            level: 'info',
+            event: 'scheduler-lag',
+            lagMs,
+            tickMs,
+            dueMs: dueStartedAt - now,
+            targets: due.map((target) => target.id).slice(0, 10),
+          });
+        }
+        let sweep;
+        sweep = runTargets(cfg, due, log, cycle, status, notifier, visitSemaphore)
+          .catch((error) =>
+            log({
+              level: 'error',
+              event: 'sweep-crashed',
+              error: String(error?.message ?? error).slice(0, 200),
+            }).catch(() => {}),
+          )
+          .finally(() => {
+            sweepsInFlight.delete(sweep);
+          });
+        sweepsInFlight.add(sweep);
       }
       const nextDue = Math.min(
         ...cfg.targets
           .filter(
             (target) =>
-              !target.paused && !target.managementLocked && Number.isFinite(target.nextDue),
+              !target.paused &&
+              !target.managementLocked &&
+              !target.schedulerQueued &&
+              Number.isFinite(target.nextDue),
           )
           .map((target) => target.nextDue),
       );
-      await waitForStop(
-        Number.isFinite(nextDue)
-          ? Math.max(1000, Math.min(5000, nextDue - Date.now()))
-          : 1000,
-      );
+      const requestedWaitMs = Number.isFinite(nextDue)
+        ? Math.max(1000, Math.min(5000, nextDue - Date.now()))
+        : 1000;
+      const waitStartedAt = Date.now();
+      await waitForStop(requestedWaitMs);
+      // setTimeout can overshoot badly when the event loop is starved by a busy
+      // Chromium; that delay directly becomes scheduling lag.
+      const waitMs = Date.now() - waitStartedAt;
+      if (waitMs - requestedWaitMs > 2_000) {
+        void log({
+          level: 'warn',
+          event: 'scheduler-wait-overshoot',
+          requestedWaitMs,
+          waitMs,
+        });
+      }
     }
+    // Let every in-flight sweep close its browsers before the process exits.
+    await Promise.allSettled([...sweepsInFlight]);
   } finally {
     try {
       await runtimeStateStore?.flushNow();

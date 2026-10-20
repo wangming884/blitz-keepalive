@@ -34,9 +34,9 @@ services:
       INTERVAL_MIN: ${INTERVAL_MIN:-20}
       JITTER_MIN: ${JITTER_MIN:-2}
       SCHEDULE_TIMEZONE: ${SCHEDULE_TIMEZONE:-Asia/Shanghai}
-      # This production profile runs exactly one Chromium instance.
-      # Change this deliberately only after reviewing memory and scheduling capacity.
-      MAX_CONCURRENT: "1"
+      # Two workers keep a cold-starting target from blocking the whole sweep.
+      # Each owns a Chromium instance (~300-500MB); drop to 1 on smaller hosts.
+      MAX_CONCURRENT: "2"
       # Each Keep-Open session owns a dedicated Chromium instance. Keep the
       # default at one and raise it only after sizing memory for all browsers.
       MAX_KEEP_OPEN_SESSIONS: ${MAX_KEEP_OPEN_SESSIONS:-1}
@@ -53,7 +53,7 @@ services:
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_MIN_INTERVAL_SEC: ${WEBHOOK_MIN_INTERVAL_SEC:-900}
       WEBHOOK_TIMEOUT_SEC: ${WEBHOOK_TIMEOUT_SEC:-10}
-      WEBHOOK_FAILURE_THRESHOLD: ${WEBHOOK_FAILURE_THRESHOLD:-3}
+      WEBHOOK_FAILURE_THRESHOLD: ${WEBHOOK_FAILURE_THRESHOLD:-1}
       BLOCK_RESOURCES: ${BLOCK_RESOURCES:-}
       STATUS_TOKEN: ${STATUS_TOKEN:-}
       REQUIRE_HTTPS: ${REQUIRE_HTTPS:-true}

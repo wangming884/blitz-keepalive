@@ -4,14 +4,16 @@
     "jitterMin": 3,
     "expect": "",
     "timeoutSec": 60,
-    "wakeWaitSec": 30,
+    "wakeWaitSec": 90,
+    "wakeExtensionSec": 0,
+    "minReadyTextLength": 0,
     "settleSec": 6,
     "retries": 2,
     "retryDelaySec": 60,
     "proxy": "",
     "proxyBypass": ""
   },
-  "maxConcurrent": 1,
+  "maxConcurrent": 2,
   "targets": [
     {
       "id": "alice-blog",

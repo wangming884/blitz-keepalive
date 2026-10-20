@@ -106,8 +106,12 @@ server {
         proxy_set_header Connection "";
 
         proxy_connect_timeout 10s;
-        proxy_read_timeout 60s;
-        proxy_send_timeout 60s;
+        # "测试连通" (/api/targets/:id/probe) is synchronous: page navigation
+        # plus the wake window can exceed one minute (WAKE_WAIT_SEC defaults to
+        # 90s). Keep this above WAKE_WAIT_SEC + TIMEOUT_SEC or Nginx answers 504
+        # while the probe is still running.
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
         proxy_redirect off;
         # Nginx owns the single HSTS header for the public origin.
         proxy_hide_header Strict-Transport-Security;

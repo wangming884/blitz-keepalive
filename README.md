@@ -65,7 +65,7 @@ targets.json
 每 5 秒扫描一次到期目标
         │
         ▼
-并发池（maxConcurrent，默认 1）
+并发池（maxConcurrent，默认 2）
   └─ worker 1: 启动独立 Chrome → 访问 → 校验 → 关闭
         │
         ▼
@@ -91,12 +91,14 @@ targets.json
     "jitterMin": 3,
     "expect": "",
     "timeoutSec": 60,
-    "wakeWaitSec": 30,
+    "wakeWaitSec": 90,
+    "wakeExtensionSec": 0,
+    "minReadyTextLength": 0,
     "settleSec": 6,
     "retries": 2,
     "retryDelaySec": 60
   },
-  "maxConcurrent": 1,
+  "maxConcurrent": 2,
   "targets": [
     { "id": "alice-blog",   "account": "alice", "url": "https://blog.alice.blitz.cloud",   "expect": "Alice" },
     { "id": "alice-n8n",    "account": "alice", "url": "https://n8n.alice.blitz.cloud",    "expect": "n8n", "intervalMin": 15 },
@@ -115,7 +117,9 @@ targets.json
 | `expect` | **建议填写**应用页面独有文字，最可靠的「已唤醒」判据 |
 | `intervalMin` | 该目标的访问间隔，1–28 分钟，且必须满足 `intervalMin + jitterMin <= 28` |
 | `jitterMin` | 该目标的随机延迟上限，0–10 分钟 |
-| `wakeWaitSec` | 常规巡检唤醒等待与探活时间（秒，5–300，默认 30；支持在后台表单配置） |
+| `wakeWaitSec` | 常规巡检唤醒等待与探活时间（秒，5–300，默认 90；支持在后台表单配置） |
+| `wakeExtensionSec` | 仅当页面**仍像唤醒页**时追加的等待时间（秒，0–600，默认 0 关闭）。冷启动超过 `wakeWaitSec` 的应用设成 60–180 |
+| `minReadyTextLength` | 页面正文至少多少字符才算就绪（0–100000，默认 0 关闭）。用于识别只渲染空壳的唤醒页 |
 | `timeoutSec` / `settleSec` / `retries` | 覆盖默认超时、停留、重试 |
 | `scheduleEnabled` | 是否启用定时启停（布尔值，默认 false） |
 | `scheduleStart` / `scheduleEnd` | 活动窗口时间（24 小时制 HH:MM，默认 08:00 - 23:00；开始晚于结束表示跨午夜） |
@@ -124,7 +128,7 @@ targets.json
 | `firstVisitWakeWaitSec` | 窗口开启时首次访问唤醒等待时间（秒，5–300，默认 180） |
 | `firstVisitTimeoutSec` | 窗口开启时首次访问页面超时时间（秒，5–300，默认 180） |
 | `firstVisitRetries` | 窗口开启时首次访问重试次数（0–5，默认 2） |
-| `maxConcurrent` | 同时访问几个目标；默认 1，Docker 生产配置固定为 1 |
+| `maxConcurrent` | 同时访问几个目标（1–5，默认 2）。每个 worker 独占一个 Chromium，内存受限时设为 1 |
 
 优先级：**目标级 > 命令行/环境变量 > defaults**。例如给 n8n 单独设 15 分钟，其余仍用 20 分钟。
 
@@ -149,7 +153,10 @@ targets.json
 3. **冷启动与 HTTP 503/502/504 自动探活**：
    - 当云平台（如 Blitz、Render 等）冷启动时，网关常返回 HTTP 503 Service Unavailable 或 502/504。
    - 系统将 503/502/504 明确识别为“服务唤醒中 / 未就绪”（`not-ready:http-503` 等），严禁将其作为已就绪处理。
-   - 在唤醒等待时间（日常 `wakeWaitSec` 或首访 `firstVisitWakeWaitSec`，均支持 5–300 秒）内，系统自动每隔 4 秒执行页面刷新探活（`page.reload`），直至容器启动完成返回 HTTP 200 并展现正常页面。
+   - 在唤醒等待时间（日常 `wakeWaitSec` 默认 90 秒，或首访 `firstVisitWakeWaitSec` 默认 180 秒）内，系统自动每隔 4 秒执行页面刷新探活（`page.reload`），直至容器启动完成返回 HTTP 200 并展现正常页面。
+   - **唤醒页可能是 HTTP 200**：Blitz 的唤醒页对中文浏览器返回中文文案（“正在唤醒”“应用正在休眠”等），并且带正文。内置规则同时匹配中英文，包括 `<title>` 里的 “Waking up”。
+   - 如果应用冷启动比 `wakeWaitSec` 更久，配置 `wakeExtensionSec`：只要页面仍判定为唤醒页，就会以 15 秒滚动窗口继续等待，总时长上限为 `wakeWaitSec + wakeExtensionSec`。
+   - 如果唤醒页会先渲染一个空壳（标题正常、正文极短），配置 `minReadyTextLength` 或直接填 `expect`，否则空壳会被误判为已就绪。
 4. **窗口开启时立即发起首次唤醒**：
    - 当活动窗口到达开启时刻，调度器将**立即**对该目标发起首次唤醒访问。
    - 每个活动窗口在首次成功访问之前，自动采用专属的冷启动参数：firstVisitWakeWaitSec（默认 180 秒）、firstVisitTimeoutSec（默认 180 秒）、firstVisitRetries（默认 2 次）。
@@ -197,11 +204,11 @@ targets.json
 
 | 目标数 | maxConcurrent | 峰值内存 | 一轮扫描耗时 |
 | --- | --- | --- | --- |
-| 1 | 1 | 约 200–250 MB | < 1 分钟 |
-| 1–5 | 1 | 约 300–450 MB | < 1 分钟 |
-| 6–20 | 1 | 约 400–500 MB | 1–3 分钟 |
-| 20–50 | 1 | 约 400–500 MB | 3–6 分钟 |
-| 50–100 | 1 | 约 400–500 MB | 6–12 分钟 |
+| 1 | 2 | 约 250–300 MB | < 1 分钟 |
+| 1–5 | 2 | 约 400–600 MB | < 1 分钟 |
+| 6–20 | 2 | 约 500–700 MB | 1–2 分钟 |
+| 20–50 | 2 | 约 500–700 MB | 2–4 分钟 |
+| 50–100 | 2 | 约 500–700 MB | 3–7 分钟 |
 
 容器默认限制为 2 GB，单 Chromium 的常规峰值通常在 400–500 MB；复杂页面、登录流程或 gVisor 环境应通过 `docker stats` 复核。实际占用受页面复杂度、Chromium 版本和失败重试影响。
 
@@ -307,7 +314,8 @@ PROXY_BYPASS=localhost,127.0.0.1
 ```
 blitz-keepalive/
 ├── keepalive.mjs                 # 主程序：调度、并发池、单实例锁、重试、日志、健康检查服务
-├── schedule.mjs                  # 目标活动窗口与首次唤醒参数（时区无关的纯函数）
+├── schedule.mjs                  # 活动窗口、首次唤醒参数、下次巡检时间计算（纯函数）
+├── page-state.mjs                # 页面就绪判定与目标健康判定（纯函数，可单测）
 ├── keepopen.mjs                  # 长驻挂机会话：心跳、重连、窗口内自动启停
 ├── urlguard.mjs                  # 目标 URL 安全：白名单、私网拦截、可信代理 CIDR
 ├── stats.mjs                     # 每日访问统计（data/stats.json，保留 90 天）
@@ -340,6 +348,7 @@ blitz-keepalive/
 ├── test/targets-proxy.json       # 代理优先级测试配置
 ├── test/admin-smoke.mjs          # 登录、目标 CRUD、自动巡检与持久化回归
 ├── test/hardening.mjs            # 指标、锁、运行态、备份与严格子资源回归
+├── test/units.mjs                # 纯函数单测：页面判定、排期退避、健康判定（秒级）
 ├── test/schedule.mjs             # 活动窗口与首访参数回归
 ├── test/keepopen.mjs             # 挂机会话生命周期、心跳与重连回归
 ├── test/readiness.mjs            # /readyz 与生产就绪语义回归
@@ -496,8 +505,8 @@ Internet
 
 | `MAX_CONCURRENT` | 建议内存 | 说明 |
 | --- | ---: | --- |
-| `1` | 2 GB | 默认生产配置，只运行一个 Chromium |
-| `2` | 4 GB | 仅明确需要提高吞吐时使用 |
+| `1` | 2 GB | 内存受限时使用，所有目标串行巡检 |
+| `2` | 3 GB | 默认值；一个冷启动目标不会阻塞其余目标 |
 | `3` 及以上 | 8 GB+ | 每个 Chromium 实例都会增加内存尖峰 |
 
 应用镜像约 3.76 GB，另需为数据、日志和 Docker 构建缓存预留空间；生产机至少准备 5 GB 可用磁盘，建议 10 GB。空闲时应用通常只占数百 MB，单次访问峰值约 420 MB；Nginx 的内存占用通常远低于 100 MB。Chromium 还会占用共享内存；当前默认配置为 2 GB 内存上限和 `512mb` 共享内存。
@@ -535,15 +544,15 @@ ADMIN_PASSWORD=使用密码管理器生成的长随机密码
 
 `KEEPALIVE_HTTP_PORT` 是宿主机回环映射端口；如果修改它，必须同步修改 Nginx 的 `proxy_pass` 地址。`ADMIN_PASSWORD` 只在首次启动且 `data/admin-auth.json` 不存在时用于初始化。登录 `/admin` 后可以在“安全设置”中修改密码；修改后以持久化的 scrypt 哈希文件为准。不要提交 `deploy/server/.env`，也不要把它复制进镜像。
 
-默认生产配置只运行一个 Chromium，并限制为 2 GB 内存和 512 MB 共享内存：
+生产配置默认运行两个 Chromium worker，并限制为 2 GB 内存和 512 MB 共享内存：
 
 ```dotenv
 KEEPALIVE_MEM_LIMIT=2g
 KEEPALIVE_SHM_SIZE=512mb
-MAX_CONCURRENT=1
+MAX_CONCURRENT=2
 ```
 
-`compose.server.yaml` 会将生产容器的 `MAX_CONCURRENT` 固定为 `1`，避免已有 `.env` 意外恢复为多浏览器并发。需要提高吞吐时，应先根据 `docker stats` 和 `/metrics` 实测结果调整资源上限，再显式修改 Compose 配置。
+`compose.server.yaml` 默认 `MAX_CONCURRENT=2`：单个目标冷启动或重试时不会阻塞其余目标。每个 Chromium 约 300–500 MB，2 GB 内存上限足够；内存更小的主机请显式改为 `1`。`compose.yaml`（1 GB 内存档）固定为 `1`。
 
 应用容器固定以 UID/GID `1001:1001` 运行，所以 `data` 和 `logs` 必须可写。若服务器上的 UID/GID 规则不同，请调整 Dockerfile 或挂载目录的所有者，不能简单改成 `chmod 777`。
 
@@ -833,7 +842,7 @@ sudo certbot renew --dry-run
 10. **相互保活**：两个 agent 容器分别访问对端模拟应用，间隔 1 分钟运行 150 秒，双方各完成 3 次成功访问（`ms` 约 1.4–5.6 秒），没有失败。
 11. **HTTP 代理**：本地 HTTP 代理（`test/fake-proxy.mjs`）验证通过，代理日志确认目标请求为 `GET http://127.0.0.1:8862/`；带 Basic 认证时 `authenticated:true`。HTTPS 目标走 CONNECT，代理日志确认 CONNECT 同样携带认证。
 12. **SOCKS5**：本地 SOCKS5 代理验证通过，`ok:true`；配置 SOCKS 用户名/密码时按预期以退出码 2 拒绝。
-13. **认证失败**：错误密码返回 HTTP 407，日志为 `proxy-auth-rejected`，约 0.8 秒失败（不空等 30 秒唤醒页）。
+13. **认证失败**：错误密码返回 HTTP 407，日志为 `proxy-auth-rejected`，约 0.8 秒失败（不空等整个唤醒窗口）。
 14. **代理不可达**：日志为 `proxy-unreachable:ERR_PROXY_CONNECTION_FAILED`，带 `proxyError:true`。
 15. **目标级代理优先级**：显式代理 → 成功；`proxy: ""` → 直连成功；未配置 → 继承全局（故意设为不可达）→ 按预期失败。
 16. **脱敏**：日志中未出现代理用户名、密码或 `user:pass@` 形式。
@@ -868,7 +877,7 @@ sudo certbot renew --dry-run
 ### 10.2 诊断与批量操作
 
 - `node keepalive.mjs --probe=https://app.example.com`：打开一次页面并输出 `ok / reason / httpStatus / title / readyState / 命中的未就绪正则 / expect 是否命中 / 是否有密码框 / 耗时 / 文本片段`。不写运行态、不进调度、不影响统计，适合首次配置目标时确认判据。
-- 管理台每个目标的“测试连通”按钮调用 `POST /api/targets/:id/probe`，会走该目标自己的代理配置，返回同样的诊断信息。
+- 管理台每个目标的“测试连通”按钮调用 `POST /api/targets/:id/probe`，会走该目标自己的代理配置，返回同样的诊断信息。探测的唤醒等待上限为 90 秒（与 `wakeWaitSec` 默认值一致），加上导航超时后单次请求最长约 150 秒；**如果前面挂了 Nginx，`proxy_read_timeout` 必须大于这个值**（示例配置已设为 300s），否则会看到 504 而探测其实还在跑。
 - 探测带整体看门狗：预算 = 导航超时 + 唤醒等待 + 30s（下限 60s、上限 180s）。超出即判定页面/浏览器无响应，CLI 输出 `probe-timeout`，接口返回 **504**，不会让一个请求无限挂住。
 - `POST /api/targets/pause-all` / `POST /api/targets/resume-all` 批量暂停或恢复；正在巡检的目标会被跳过并出现在 `skipped` 中。
 - 导入目标前会显示“新增 / 更新 / 不变 / 移除”差异预览，再执行替换。
@@ -879,7 +888,7 @@ sudo certbot renew --dry-run
 
 | event | 触发条件 |
 | --- | --- |
-| `target-failure` | 连续失败次数达到 `WEBHOOK_FAILURE_THRESHOLD`（默认 3） |
+| `target-failure` | 连续失败次数达到 `WEBHOOK_FAILURE_THRESHOLD`（默认 1，即首次失败就告警） |
 | `target-recovered` | 之前失败的目标恢复成功 |
 | `readiness-not-ready` / `readiness-recovered` | 首次采样即不就绪，或 `/readyz` 就绪状态翻转 |
 | `keep-open-unstable` | 挂机会话连续 3 次连接或心跳失败 |
@@ -951,7 +960,17 @@ POST   /api/targets/import          # 完整替换网页管理目标
 
 `DELETE /api/logs` 仅允许管理员会话调用；成功后返回清理的内存事件数量，只保留新写入的 `logs-cleared` 审计事件，且不会删除失败现场。
 
-`/metrics` 使用 Prometheus 文本格式，包含进程存活、`blitz_keepalive_ready`、目标数、累计访问/失败、活跃浏览器、排队任务、Node.js RSS 和运行时间。目标级指标包括最近成功时间、连续失败数、下次执行时间、暂停状态和调度超时状态；目标级指标带有目标 ID 标签，必须限制 `/metrics` 的访问范围。未携带会话或 `STATUS_TOKEN` 时返回 `401`；采集器示例：
+`/metrics` 使用 Prometheus 文本格式，包含进程存活、`blitz_keepalive_ready`、目标数、累计访问/失败、活跃浏览器、排队任务、Node.js RSS 和运行时间。目标级指标包括最近成功时间、**距上次成功的秒数**（`blitz_keepalive_target_last_success_age_seconds`，从未成功为 `-1`）、连续失败数、下次执行时间、暂停状态和调度超时状态；目标级指标带有目标 ID 标签，必须限制 `/metrics` 的访问范围。未携带会话或 `STATUS_TOKEN` 时返回 `401`；采集器示例：
+
+调度器健康度有两个全局指标，用来发现「进程活着但不再巡检」的情况：
+
+- `blitz_keepalive_scheduler_loop_age_seconds`：调度循环距上次推进的秒数。超过 600 秒时 `/readyz` 会返回 `503` 并给出 `scheduler-stalled`。
+- `blitz_keepalive_scheduler_lag_seconds`：最逾期的活跃目标落后计划多少秒。
+- `blitz_keepalive_visit_permits_active` / `blitz_keepalive_visit_permits_pending`：当前占用 / 排队等待巡检许可的数量，上限就是 `MAX_CONCURRENT`。`pending` 长期大于 0 说明目标数或冷启动时间已经超出并发能力。
+
+调度器允许**多批巡检重叠**：一个慢目标在重试时，其它到期目标会立即进入队列，而不是等整批跑完。总并发仍由 `MAX_CONCURRENT` 统一限制，`scheduler-lag` 日志事件会记录超过 2 秒的调度延迟。
+
+建议对 `last_success_age_seconds > 1.5 × INTERVAL_MIN × 60` 和 `scheduler_loop_age_seconds > 300` 设置告警。
 
 ```text
 Authorization: Bearer <STATUS_TOKEN>
@@ -1016,7 +1035,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 11. **代理凭据**：优先用 `PROXY_PASSWORD` 等环境变量，`--proxy-pass` 会出现在进程列表；SOCKS 认证不被 Chromium 支持；Chrome 仍会经代理发出少量后台请求（组件更新、GCM），代理侧会看到这些域名。
 12. **暂停与运行态**：手动暂停和自动认证失败暂停会写入 `runtime-state.json`，重启后继续保持；需要长期停用时仍建议删除目标或移出配置文件，并定期备份运行态文件。
 13. **HTTPS 代理信任**：`REQUIRE_HTTPS=true` 时 `/healthz` 与 `/readyz` 在应用层允许明文探针，示例 Nginx 默认只允许本机访问 `/readyz`；只有配置了可信代理 CIDR，服务才接受 `X-Forwarded-Proto: https`，否则反向代理后的请求也会被 426 拒绝。
-14. **目标 URL 安全边界**：主文档导航（含 302 跳转）会逐请求校验允许列表与私网地址，子资源默认只拦私网地址。校验时解析 DNS、浏览器随后会再解析一次，理论上仍有 DNS rebinding 窗口；因此管理密码必须足够强，不要把 `TARGET_URL_ALLOWLIST=*` 与 `TARGET_URL_ALLOW_PRIVATE=true` 同时暴露到公网。
+14. **目标 URL 安全边界**：主文档导航（含 302 跳转）会逐请求校验允许列表与私网地址，子资源默认只拦私网地址。校验时解析出的地址会通过 `--host-resolver-rules` 固定给 Chromium，浏览器不再自行解析，因此不再存在 DNS rebinding 窗口（走代理的目标由代理解析，不在固定范围内）。即便如此，仍不要把 `TARGET_URL_ALLOWLIST=*` 与 `TARGET_URL_ALLOW_PRIVATE=true` 同时暴露到公网。
 
 ## 12. 参数速查
 
@@ -1076,7 +1095,7 @@ Expand-Archive -LiteralPath .\backups\blitz-keepalive-backup-YYYYMMDD-HHMMSS.zip
 --dump-failures     开启失败现场落盘（默认关闭，等价 DUMP_FAILURES=true）
 ```
 
-环境变量：`SCHEDULE_TIMEZONE`、`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`MAX_KEEP_OPEN_SESSIONS`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`STATS_FILE`、`PUBLIC_STATUS`、`WEBHOOK_URL`、`WEBHOOK_MIN_INTERVAL_SEC`、`WEBHOOK_TIMEOUT_SEC`、`WEBHOOK_FAILURE_THRESHOLD`、`BLOCK_RESOURCES`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。网页目标的代理模式、代理地址、用户名、密码和绕过列表通过管理 API 配置，不需要为每个目标新增环境变量。
+环境变量：`SCHEDULE_TIMEZONE`、`EXPECT_TEXT`、`INTERVAL_MIN`、`JITTER_MIN`、`MAX_CONCURRENT`、`MAX_KEEP_OPEN_SESSIONS`、`HEADLESS`、`CHROME_PATH`、`PORT`、`BIND_HOST`、`ADMIN_PASSWORD`、`ADMIN_PASSWORD_FILE`、`STATUS_TOKEN`、`REQUIRE_HTTPS`、`TRUST_PROXY`、`TRUST_PROXY_CIDRS`、`SESSION_IDLE_TIMEOUT_MIN`、`MANAGED_TARGETS_FILE`、`RUNTIME_STATE_FILE`、`STATS_FILE`、`PUBLIC_STATUS`、`WEBHOOK_URL`、`WEBHOOK_MIN_INTERVAL_SEC`、`WEBHOOK_TIMEOUT_SEC`、`WEBHOOK_FAILURE_THRESHOLD`、`BLOCK_RESOURCES`、`TARGET_SECRET_KEY`、`TARGET_SECRET_KEY_FILE`、`TARGET_URL_ALLOWLIST`、`TARGET_URL_ALLOW_PRIVATE`、`TARGET_URL_STRICT_SUBRESOURCES`、`CHROME_NO_SANDBOX`、`PROXY_URL`、`PROXY_USERNAME`、`PROXY_PASSWORD`、`PROXY_BYPASS`、`NO_PROXY`、`LOG_DIR`、`TIMEOUT_SEC`、`WAKE_WAIT_SEC`、`WAKE_EXTENSION_SEC`、`MIN_READY_TEXT_LENGTH`、`SETTLE_SEC`、`RETRIES`、`RETRY_DELAY_SEC`、`NOT_READY_REGEX`、`USER_AGENT`、`LOCK_FILE`、`DUMP_FAILURES`、`FAILURE_DUMP_MAX_FILES`、`FAILURE_DUMP_MAX_AGE_DAYS`、`ONCE`。网页目标的代理模式、代理地址、用户名、密码和绕过列表通过管理 API 配置，不需要为每个目标新增环境变量。
 
 备份脚本另外读取 `BACKUP_PASSPHRASE` 或 `BACKUP_PASSPHRASE_FILE`；这两个变量不会被保活进程使用。
 

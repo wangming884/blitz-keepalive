@@ -303,8 +303,10 @@ async function main() {
       cookie: boundaryCookie,
     });
     assert.equal(boundaryOverview.response.status, 200, boundaryOverview.text);
-    assert.equal(boundaryOverview.data.config.maxConcurrent, 1);
-    checks.push('single-browser-default');
+    // Default worker pool is 2: one cold-starting target must not block the
+    // rest of the sweep. Memory-constrained hosts pin this to 1 explicitly.
+    assert.equal(boundaryOverview.data.config.maxConcurrent, 2);
+    checks.push('dual-worker-default');
     const emptyReadiness = await request(boundary.baseUrl, '/readyz');
     assert.equal(emptyReadiness.response.status, 200, emptyReadiness.text);
     assert.equal(emptyReadiness.data.ready, true);

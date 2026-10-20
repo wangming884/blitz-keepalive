@@ -99,6 +99,8 @@ const elements = {
   targetInterval: document.getElementById('target-interval'),
   targetJitter: document.getElementById('target-jitter'),
   targetWakeWait: document.getElementById('target-wake-wait'),
+  targetWakeExtension: document.getElementById('target-wake-extension'),
+  targetMinReadyText: document.getElementById('target-min-ready-text'),
   targetExpect: document.getElementById('target-expect'),
   targetLoginSuccessSelector: document.getElementById('target-login-success-selector'),
   targetScheduleEnabled: document.getElementById('target-schedule-enabled'),
@@ -632,6 +634,10 @@ function targetHasFailure(target) {
   return (
     !target.paused &&
     !target.scheduledOff &&
+    // A keep-open session keeps the app alive without scheduled visits, so the
+    // failure counter is frozen for its duration and must not paint the target
+    // (or the "失败" metric) red.
+    !target.keepOpenActive &&
     (target.lastVisit?.ok === false ||
       Number(target.consecutiveFailures) > 0 ||
       target.readinessIssues?.length > 0)
@@ -1005,6 +1011,7 @@ function formatReason(raw) {
   if (value === 'not-ready:http-502') return '服务启动中 (HTTP 502)';
   if (value === 'not-ready:http-504') return '网关响应超时 (HTTP 504)';
   if (value === 'expect-text-missing') return '未找到期望文本';
+  if (value === 'page-too-short') return '页面内容过短，可能仍在唤醒';
   if (value === 'empty-page') return '页面为空';
   if (value === 'not-ready-timeout') return '等待页面就绪超时';
   if (value.startsWith('not-ready:')) return `页面未就绪 (${value.slice(10)})`;
@@ -1138,7 +1145,9 @@ function openTargetDialog(target = null) {
   elements.targetProxyBypass.value = target?.proxyBypass || target?.proxy?.bypass || '';
   elements.targetInterval.value = String(target?.intervalMin ?? 20);
   elements.targetJitter.value = String(target?.jitterMin ?? 2);
-  elements.targetWakeWait.value = String(target?.wakeWaitSec ?? 30);
+  elements.targetWakeWait.value = String(target?.wakeWaitSec ?? 90);
+  elements.targetWakeExtension.value = String(target?.wakeExtensionSec ?? 0);
+  elements.targetMinReadyText.value = String(target?.minReadyTextLength ?? 0);
   elements.targetExpect.value = target?.expect || '';
   elements.targetLoginSuccessSelector.value = target?.loginSuccessSelector || '';
   elements.targetLoginPassword.value = '';
@@ -1421,6 +1430,8 @@ async function submitTargetForm(event) {
     intervalMin: Number(elements.targetInterval.value),
     jitterMin: Number(elements.targetJitter.value),
     wakeWaitSec: Number(elements.targetWakeWait.value),
+    wakeExtensionSec: Number(elements.targetWakeExtension.value) || 0,
+    minReadyTextLength: Number(elements.targetMinReadyText.value) || 0,
     expect: elements.targetExpect.value.trim(),
     loginSuccessSelector: elements.targetLoginSuccessSelector.value.trim(),
     proxyMode: elements.targetProxyMode.value,

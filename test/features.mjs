@@ -543,6 +543,14 @@ async function runIntegrationTests(tempDir) {
     assert.match(metrics.text, /blitz_keepalive_visit_duration_seconds_count\{target="probe-ok"\} \d+/);
     assert.match(metrics.text, /blitz_keepalive_keep_open_sessions \d+/);
     assert.match(metrics.text, /blitz_keepalive_visits_total \d+/);
+    // Scheduler health: a frozen loop keeps /healthz green, so these two gauges
+    // are the only signal that visits stopped happening.
+    assert.match(metrics.text, /blitz_keepalive_scheduler_loop_age_seconds \d+/);
+    assert.match(metrics.text, /blitz_keepalive_scheduler_lag_seconds \d+/);
+    assert.match(
+      metrics.text,
+      /blitz_keepalive_target_last_success_age_seconds\{target="probe-ok"\} -?\d+/,
+    );
 
     // Invalid resource filter is rejected at startup.
     const bad = startProcess('keepalive.mjs', [

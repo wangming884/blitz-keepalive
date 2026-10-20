@@ -154,10 +154,14 @@ async function resolveTargetHost(hostname) {
 }
 
 /**
- * Validates a target URL. `enforceAllowlist: false` still rejects private
- * addresses, which is what subresource requests use.
+ * Validates a target URL and returns the addresses it resolved to.
+ *
+ * Returning the addresses lets the caller pin them into Chromium
+ * (`--host-resolver-rules`). Without that, the browser performs its own DNS
+ * lookup at connect time, so a record that changes between validation and
+ * navigation would slip past the private-address check.
  */
-export async function validateTargetUrl(rawUrl, cfg, { enforceAllowlist = true } = {}) {
+export async function resolveTargetUrl(rawUrl, cfg, { enforceAllowlist = true } = {}) {
   let url;
   try {
     url = new URL(rawUrl);
@@ -181,7 +185,8 @@ export async function validateTargetUrl(rawUrl, cfg, { enforceAllowlist = true }
     if (!cfg.targetUrlAllowPrivate && isPrivateIpAddress(literal.address)) {
       throw new TargetUrlError(`默认禁止访问私网或本机地址：${hostname}`);
     }
-    return url;
+    // An IP literal needs no pinning: there is nothing left to resolve.
+    return { url, hostname, addresses: [] };
   }
 
   const addresses = await resolveTargetHost(hostname);
@@ -191,5 +196,27 @@ export async function validateTargetUrl(rawUrl, cfg, { enforceAllowlist = true }
   ) {
     throw new TargetUrlError(`目标域名解析到私网或本机地址：${hostname}`);
   }
+  return { url, hostname, addresses };
+}
+
+/**
+ * Validates a target URL. `enforceAllowlist: false` still rejects private
+ * addresses, which is what subresource requests use.
+ */
+export async function validateTargetUrl(rawUrl, cfg, options) {
+  const { url } = await resolveTargetUrl(rawUrl, cfg, options);
   return url;
+}
+
+/**
+ * Builds the Chromium `--host-resolver-rules` value that pins `hostname` to the
+ * addresses validated above. Returns null when there is nothing to pin.
+ */
+export function buildResolverRules(hostname, addresses) {
+  if (!hostname || !Array.isArray(addresses) || addresses.length === 0) return null;
+  const rules = addresses
+    .map((entry) => entry?.address)
+    .filter(Boolean)
+    .map((address) => `MAP ${hostname} ${address}`);
+  return rules.length > 0 ? rules.join(', ') : null;
 }

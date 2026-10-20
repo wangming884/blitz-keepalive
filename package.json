@@ -13,8 +13,8 @@
     "fake": "node test/fake-blitz.mjs",
     "check": "node scripts/check-syntax.mjs && node scripts/check-frontend.mjs",
     "test": "npm run test:unit && npm run test:integration",
-    "test:unit": "node test/schedule.mjs --unit-only && node test/keepopen.mjs --unit-only",
-    "test:integration": "node test/schedule.mjs && node test/keepopen.mjs && node test/readiness.mjs && node test/admin-smoke.mjs && node test/target-proxy.mjs && node test/hardening.mjs && node test/features.mjs"
+    "test:unit": "node test/units.mjs && node test/schedule.mjs --unit-only && node test/keepopen.mjs --unit-only",
+    "test:integration": "node test/schedule.mjs && node test/keepopen.mjs && node test/readiness.mjs && node test/admin-smoke.mjs && node test/target-proxy.mjs && node test/hardening.mjs && node test/features.mjs && node test/wake-page.mjs"
   },
   "dependencies": {
     "puppeteer-core": "^25.14.0"

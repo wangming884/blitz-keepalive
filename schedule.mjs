@@ -173,17 +173,33 @@ export function normalizeScheduleFields(raw = {}, fallback = {}) {
   };
 }
 
+// Constructing Intl.DateTimeFormat is expensive (it resolves the tz database),
+// and the scheduler calls these helpers dozens of times per loop iteration.
+// One formatter per (timezone, shape) is reused for the process lifetime.
+const formatterCache = new Map();
+
+function zonedFormatter(timeZone, withWeekday) {
+  const key = `${withWeekday ? 'weekday' : 'plain'}|${timeZone}`;
+  let formatter = formatterCache.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      ...(withWeekday ? { weekday: 'short' } : {}),
+    });
+    formatterCache.set(key, formatter);
+  }
+  return formatter;
+}
+
 export function getTimeZoneOffsetMs(date, timeZone) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  });
+  const dtf = zonedFormatter(timeZone, false);
   const parts = dtf.formatToParts(date);
   const p = {};
   for (const { type, value } of parts) p[type] = value;
@@ -209,17 +225,7 @@ export function parseZonedTimeToMs(dateStr, timeStr, timeZone) {
 }
 
 export function getZonedDateParts(date, timeZone) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    weekday: 'short',
-    hourCycle: 'h23',
-  });
+  const dtf = zonedFormatter(timeZone, true);
   const parts = dtf.formatToParts(date);
   const p = {};
   for (const { type, value } of parts) p[type] = value;
@@ -390,4 +396,66 @@ export function getScheduleState(
     firstVisitPending: false,
     timeZone: tz,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Next-visit computation
+// ---------------------------------------------------------------------------
+
+const MINUTE_MS = 60_000;
+
+/** interval + jitter must stay below blitz.cloud's 30-minute sleep threshold. */
+export const MAX_VISIT_WINDOW_MIN = 28;
+/** Consecutive failures before backoff starts stretching the interval. */
+export const FAILURE_BACKOFF_START = 5;
+/** Hard cap on the backoff multiplier; never enough to cross the sleep window. */
+export const FAILURE_BACKOFF_MAX_MULTIPLIER = 2;
+
+/**
+ * Computes and stores the next due time for a target.
+ *
+ * Keep-alive has an inverted cost model compared to a normal crawler: visiting
+ * too rarely is worse than visiting a failing page, because a sleeping app has
+ * to cold-start on the next visit and is more likely to fail again. So the
+ * first few failures keep the normal cadence, and backoff only kicks in once
+ * the target looks permanently broken. Even then the delay stays under
+ * MAX_VISIT_WINDOW_MIN so a recovered target is noticed before it sleeps.
+ *
+ * `onScheduled` lets the caller persist the runtime state without this module
+ * depending on the state store.
+ */
+export function scheduleNext(
+  target,
+  { failed = false, onScheduled = null } = {},
+  now = Date.now(),
+  timeZone = DEFAULT_SCHEDULE_TIMEZONE,
+) {
+  const failures = Math.max(0, Number(target.consecutiveFailures) || 0);
+  const multiplier =
+    failed && failures >= FAILURE_BACKOFF_START
+      ? Math.min(2 ** (failures - FAILURE_BACKOFF_START + 1), FAILURE_BACKOFF_MAX_MULTIPLIER)
+      : 1;
+  const jitter = target.jitterMs > 0 ? Math.floor(Math.random() * target.jitterMs) : 0;
+  const delay = Math.min(
+    target.intervalMs * multiplier + jitter,
+    MAX_VISIT_WINDOW_MIN * MINUTE_MS,
+  );
+  let nextDue = now + delay;
+
+  if (target.scheduleEnabled) {
+    const scheduleState = getScheduleState(target, now, timeZone);
+    if (scheduleState.active) {
+      if (scheduleState.windowEndMs && nextDue >= scheduleState.windowEndMs) {
+        const nextStart = getNextWindowStart(target, scheduleState.windowEndMs, timeZone);
+        if (nextStart) nextDue = nextStart;
+      }
+    } else {
+      const nextStart = getNextWindowStart(target, now, timeZone);
+      if (nextStart) nextDue = nextStart;
+    }
+  }
+
+  target.nextDue = nextDue;
+  if (typeof onScheduled === 'function') onScheduled();
+  return Math.max(0, nextDue - now);
 }

@@ -607,6 +607,13 @@ async function main() {
 
     const importPayload = structuredClone(exported.data);
     importPayload.targets[0].intervalMin = 2;
+    // Resuming (and stopping keep-open) leaves nextDue in the past, so the
+    // scheduler immediately fires a catch-up visit. Import refuses targets that
+    // are mid-visit, so wait for the target to go idle instead of assuming it.
+    await waitForOverview(baseUrl, cookie, (overview) => {
+      const target = overview.targets.find((item) => item.id === targetId);
+      return Boolean(target) && !target.running && !target.locked;
+    });
     const imported = await request(baseUrl, '/api/targets/import', {
       method: 'POST',
       cookie,
