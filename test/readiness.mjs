@@ -168,6 +168,7 @@ async function createTarget(baseUrl, cookie, id, url, overrides = {}) {
       expect: '',
       timeoutSec: 15,
       wakeWaitSec: 5,
+      wakeExtensionSec: 0,
       settleSec: 0,
       retries: 0,
       scheduleEnabled: false,
@@ -246,6 +247,7 @@ async function main() {
         '--max-concurrent=1',
         '--timeout-sec=15',
         '--wake-wait-sec=5',
+        '--wake-extension-sec=0',
         '--settle-sec=0',
         '--retries=0',
         '--dump-failures=false',
@@ -334,6 +336,7 @@ async function main() {
       expect: 'Demo app is online',
       timeoutSec: 15,
       wakeWaitSec: 5,
+      wakeExtensionSec: 0,
     });
     const loginRedirectTarget = await waitForTarget(
       baseUrl,

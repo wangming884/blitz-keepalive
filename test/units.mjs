@@ -70,8 +70,73 @@ assert.equal(
   true,
   '文案只在 <title> 里也要命中',
 );
+// 真实 blitz.cloud 中文唤醒页（用「觉醒」而不是「唤醒」）
+assert.equal(
+  classify(
+    target(),
+    state(
+      'Opencode正在觉醒 有人已经很久没用这个应用了，所以它一直在休眠。现在开始了，需要比平时更长时间。' +
+        '当应用准备好时，该页面会自动打开。 唤醒它 启动应用 连接地址 等待 34 秒。你什么都不用做。',
+    ),
+  ).reason.startsWith('not-ready:'),
+  true,
+  '「正在觉醒」唤醒页必须被识别',
+);
 assert.equal(classify(target(), state('Operations Handbook')).awake, true);
 checks.push('wake-page-bilingual');
+
+console.log('[test/units.mjs] 2b. classify: English wake page and its bare shell...');
+{
+  // 真实英文唤醒页（Outlook is waking up），含超时提示变体
+  const enWake =
+    'blitz.cloud Outlook is waking up Nobody has used this app for a while, so it was asleep. ' +
+    'It is starting now and needs a little longer than usual. This page opens the app by itself ' +
+    'when it is ready. Waking it up Starting the app Connecting the address Waiting 39 s. ' +
+    'You do not need to do anything. Taking a little longer than usual. ' +
+    'Is this your app? See why it was asleep This app runs on blitz.cloud.';
+  assert.equal(classify(target(), state(enWake)).reason.startsWith('not-ready:'), true);
+
+  // 只留下「超出预估」提示时也要能识别（正文可能还没渲染出来）
+  assert.equal(
+    classify(target(), state('Taking a little longer than usual.')).reason.startsWith('not-ready:'),
+    true,
+  );
+  assert.equal(
+    classify(target(), state('比平时花的时间更长。')).reason.startsWith('not-ready:'),
+    true,
+  );
+
+  // 水合前的骨架：只有平台品牌，正文还没渲染
+  assert.equal(classify(target(), state('blitz.cloud')).reason, 'wake-page-shell');
+
+  // 骨架的另一种形态：页头品牌 + 营销页脚（正文仍未渲染）
+  assert.equal(
+    classify(
+      target(),
+      state('blitz.cloud This app runs on blitz.cloud. Put your own apps online for free'),
+    ).reason.startsWith('not-ready:'),
+    true,
+  );
+  assert.equal(
+    classify(target(), state('blitz.cloud 这个应用运行在 blitz.cloud 上。免费将自己的应用放到网上'))
+      .reason.startsWith('not-ready:'),
+    true,
+  );
+
+  // 极简登录页不能因为短就被当成骨架（真实回归：61 字符的登录页曾永远等不到就绪）
+  assert.equal(
+    classify(target(), state('Sign in Email Password Continue This app runs on blitz.cloud.')).awake,
+    true,
+  );
+
+  // 正文足够长的真实页面（页脚同样有 blitz.cloud）不能被误伤
+  assert.equal(
+    classify(target(), state(`Operations Handbook ${'x'.repeat(200)} This app runs on blitz.cloud.`))
+      .awake,
+    true,
+  );
+  checks.push('english-wake-and-shell');
+}
 
 console.log('[test/units.mjs] 3. classify: stateful regex must not poison later calls...');
 {

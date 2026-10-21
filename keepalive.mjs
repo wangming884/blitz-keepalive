@@ -1740,12 +1740,14 @@ function loadConfig() {
       max: 300,
     }) ?? 90,
     // Extra budget granted only while the page still looks like a wake page.
-    // 0 disables it; raise it for apps that need several minutes to boot.
+    // 120s by default: blitz.cloud announces "Probably about 34 s more" and the
+    // real figure often overshoots. Giving up mid-wake wastes the whole visit,
+    // so the default leans generous. Set 0 to fail as soon as wakeWaitSec ends.
     wakeExtensionSec: toNumber(
       args['wake-extension-sec'] ?? process.env.WAKE_EXTENSION_SEC ?? fileDefaults.wakeExtensionSec,
       'wakeExtensionSec',
       { min: 0, max: 600 },
-    ) ?? 0,
+    ) ?? 120,
     // Minimum visible text length before a page counts as ready. 0 disables the
     // check; useful for apps whose wake page renders a thin shell.
     minReadyTextLength: toNumber(
@@ -2181,12 +2183,16 @@ async function waitForApp(
   let state = { title: '', text: '', ready: 'loading' };
   let verdict = { awake: false, reason: 'loading' };
   let lastReloadAt = Date.now();
+  let lastWakeSignature = null;
+  let unchangedWakePolls = 0;
   const looksLikeWakePage = () =>
     currentStatus === 503 ||
     currentStatus === 502 ||
     currentStatus === 504 ||
     verdict.reason.startsWith('not-ready:') ||
-    verdict.reason === 'page-too-short';
+    verdict.reason === 'page-too-short' ||
+    // 骨架页同样属于「还没醒」：既不该判就绪，也要享受延长等待和刷新重试。
+    verdict.reason === 'wake-page-shell';
   for (;;) {
     try {
       state = await readPageState(page);
@@ -2218,7 +2224,20 @@ async function waitForApp(
 
     const isWaking = looksLikeWakePage();
 
-    if (isWaking && Date.now() - lastReloadAt >= 4_000) {
+    // A wake page showing a live countdown ("等待 34 秒") changes on every poll.
+    // Reloading it restarts that countdown instead of letting the app finish
+    // booting, so only refresh a wake page that has gone completely static.
+    if (isWaking) {
+      const signature = state.text.slice(0, 200);
+      if (signature === lastWakeSignature) unchangedWakePolls += 1;
+      else {
+        lastWakeSignature = signature;
+        unchangedWakePolls = 0;
+      }
+    }
+
+    if (isWaking && unchangedWakePolls >= 3 && Date.now() - lastReloadAt >= 4_000) {
+      unchangedWakePolls = 0;
       lastReloadAt = Date.now();
       try {
         const reloadResponse = await page.reload({

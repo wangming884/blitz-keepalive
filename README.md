@@ -92,7 +92,7 @@ targets.json
     "expect": "",
     "timeoutSec": 60,
     "wakeWaitSec": 90,
-    "wakeExtensionSec": 0,
+    "wakeExtensionSec": 120,
     "minReadyTextLength": 0,
     "settleSec": 6,
     "retries": 2,
@@ -118,7 +118,7 @@ targets.json
 | `intervalMin` | 该目标的访问间隔，1–28 分钟，且必须满足 `intervalMin + jitterMin <= 28` |
 | `jitterMin` | 该目标的随机延迟上限，0–10 分钟 |
 | `wakeWaitSec` | 常规巡检唤醒等待与探活时间（秒，5–300，默认 90；支持在后台表单配置） |
-| `wakeExtensionSec` | 仅当页面**仍像唤醒页**时追加的等待时间（秒，0–600，默认 0 关闭）。冷启动超过 `wakeWaitSec` 的应用设成 60–180 |
+| `wakeExtensionSec` | 仅当页面**仍像唤醒页**时追加的等待时间（秒，0–600，默认 120）。设 0 表示到点即放弃，冷启动很慢的应用可调到 180 |
 | `minReadyTextLength` | 页面正文至少多少字符才算就绪（0–100000，默认 0 关闭）。用于识别只渲染空壳的唤醒页 |
 | `timeoutSec` / `settleSec` / `retries` | 覆盖默认超时、停留、重试 |
 | `scheduleEnabled` | 是否启用定时启停（布尔值，默认 false） |
@@ -155,7 +155,7 @@ targets.json
    - 系统将 503/502/504 明确识别为“服务唤醒中 / 未就绪”（`not-ready:http-503` 等），严禁将其作为已就绪处理。
    - 在唤醒等待时间（日常 `wakeWaitSec` 默认 90 秒，或首访 `firstVisitWakeWaitSec` 默认 180 秒）内，系统自动每隔 4 秒执行页面刷新探活（`page.reload`），直至容器启动完成返回 HTTP 200 并展现正常页面。
    - **唤醒页可能是 HTTP 200**：Blitz 的唤醒页对中文浏览器返回中文文案（“正在唤醒”“应用正在休眠”等），并且带正文。内置规则同时匹配中英文，包括 `<title>` 里的 “Waking up”。
-   - 如果应用冷启动比 `wakeWaitSec` 更久，配置 `wakeExtensionSec`：只要页面仍判定为唤醒页，就会以 15 秒滚动窗口继续等待，总时长上限为 `wakeWaitSec + wakeExtensionSec`。
+   - 如果应用冷启动比 `wakeWaitSec` 更久，配置 `wakeExtensionSec`（默认 120 秒）：只要页面仍判定为唤醒页，就会以 15 秒滚动窗口继续等待，总时长上限为 `wakeWaitSec + wakeExtensionSec`。唤醒页里的倒计时（“等待 34 秒”）不会触发页面刷新，否则计时器会被重置。
    - 如果唤醒页会先渲染一个空壳（标题正常、正文极短），配置 `minReadyTextLength` 或直接填 `expect`，否则空壳会被误判为已就绪。
 4. **窗口开启时立即发起首次唤醒**：
    - 当活动窗口到达开启时刻，调度器将**立即**对该目标发起首次唤醒访问。

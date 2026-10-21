@@ -5,7 +5,7 @@
     "expect": "",
     "timeoutSec": 60,
     "wakeWaitSec": 90,
-    "wakeExtensionSec": 0,
+    "wakeExtensionSec": 120,
     "minReadyTextLength": 0,
     "settleSec": 6,
     "retries": 2,

@@ -1012,6 +1012,7 @@ function formatReason(raw) {
   if (value === 'not-ready:http-504') return '网关响应超时 (HTTP 504)';
   if (value === 'expect-text-missing') return '未找到期望文本';
   if (value === 'page-too-short') return '页面内容过短，可能仍在唤醒';
+  if (value === 'wake-page-shell') return '唤醒页加载中';
   if (value === 'empty-page') return '页面为空';
   if (value === 'not-ready-timeout') return '等待页面就绪超时';
   if (value.startsWith('not-ready:')) return `页面未就绪 (${value.slice(10)})`;

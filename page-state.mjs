@@ -41,6 +41,13 @@ export const DEFAULT_NOT_READY_PATTERNS = Object.freeze([
   /504\s+gateway\s+timeout/i,
   /正在唤醒/,
   /唤醒中/,
+  // blitz.cloud 的中文唤醒页用的是「觉醒」而不是「唤醒」：
+  // "Opencode正在觉醒 / 有人已经很久没用这个应用了，所以它一直在休眠"
+  /正在觉醒/,
+  /一直在休眠/,
+  /该页面会自动打开/,
+  /等待\s*\d+\s*秒/,
+  /需要比平时更长时间/,
   /应用(?:已|正在)?休眠/,
   /应用正在启动/,
   /正在启动应用/,
@@ -49,6 +56,24 @@ export const DEFAULT_NOT_READY_PATTERNS = Object.freeze([
   /\bcold\s*start/i,
   /\bstarting\s+up\b/i,
   /\bthis\s+page\s+will\s+(?:reload|refresh)\s+automatically/i,
+  // 英文唤醒页的分阶段文案（"Outlook is waking up" 那种）。步骤列表和倒计时
+  // 在页面水合前后都会出现，比只匹配标题更早生效。
+  /\bstarting\s+the\s+app\b/i,
+  /\bconnecting\s+the\s+address\b/i,
+  /\bwaiting\s+\d+\s*s\b/i,
+  /\bprobably\s+about\s+\d+\s*s\b/i,
+  /\bnobody\s+has\s+used\s+this\s+app\b/i,
+  /\bthis\s+page\s+opens\s+the\s+app\s+by\s+itself\b/i,
+  // 冷启动超出预估时的提示语（页面会从 "Probably about 34 s more" 切到这句）
+  /\btaking\s+a\s+(?:little\s+)?longer\s+than\s+usual\b/i,
+  /\bneeds?\s+a\s+(?:little\s+)?longer\s+than\s+usual\b/i,
+  /比平时花的时间更长/,
+  // 唤醒页的静态外壳：页头品牌与营销页脚先于正文渲染，正文还没出来时这两句
+  // 已经在 DOM 里，而真实应用不会出现它们。
+  /\bsee\s+why\s+it\s+was\s+asleep\b/i,
+  /\bput\s+your\s+own\s+apps\s+online\s+for\s+free\b/i,
+  /看看它为什么睡着了/,
+  /免费将自己的应用放到网上/,
 ]);
 
 /**
@@ -70,6 +95,16 @@ export function classify(target, state, { requireExpect = true, status = null } 
   for (const pattern of target.notReadyPatterns ?? []) {
     pattern.lastIndex = 0;
     if (pattern.test(haystack)) return { awake: false, reason: `not-ready:${pattern.source}` };
+  }
+  // A wake page renders its shell before the copy arrives: the platform footer
+  // ("This app runs on blitz.cloud") is already in the DOM while the body is
+  // still empty. Strip the brand and look at what is left — a real page (even a
+  // minimal login form) keeps well over 40 characters of its own text.
+  if (/blitz\.cloud/i.test(state.text)) {
+    const withoutBrand = state.text.replace(/blitz\.cloud/gi, '').trim();
+    if (withoutBrand.length < 40) {
+      return { awake: false, reason: 'wake-page-shell' };
+    }
   }
   // A wake page that renders an app shell can be short but "complete". When the
   // target opts into a minimum length, a thin page keeps waiting instead of
